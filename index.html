@@ -176,6 +176,61 @@
   }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   tbody tr:hover { background: #fafafa; }
+  tbody tr.total {
+    font-weight: 600;
+    background: #fafafa;
+    border-top: 2px solid #d9d9d9;
+  }
+  tbody tr.total:hover { background: #f0f0f0; }
+  tbody tr.talent-header {
+    background: #f0f7ff;
+    font-weight: 600;
+    border-top: 1px solid #d9d9d9;
+  }
+  tbody tr.talent-header:hover { background: #e6f4ff; }
+  tbody tr.talent-item td:first-child {
+    padding-left: 28px;
+    color: var(--muted);
+  }
+  td.editable {
+    cursor: pointer;
+    background: #fffbe6;
+    position: relative;
+  }
+  td.editable:hover { background: #fff1b8; }
+  td.editable::after {
+    content: '✎';
+    position: absolute;
+    right: 4px;
+    top: 4px;
+    font-size: 10px;
+    color: #d48806;
+    opacity: 0.5;
+  }
+  td.editable input {
+    width: 100%;
+    border: 1px solid var(--primary);
+    border-radius: 2px;
+    padding: 4px;
+    font-size: 13px;
+    background: #fff;
+    font-family: inherit;
+    box-sizing: border-box;
+  }
+  td.editable input.num-input {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  td.video-links a {
+    color: var(--primary);
+    text-decoration: none;
+    display: block;
+    line-height: 1.6;
+    font-size: 12px;
+  }
+  td.video-links a:hover { text-decoration: underline; }
+  td.video-links .sales { color: var(--muted); margin-left: 4px; }
+  td.empty { color: var(--muted); }
   .placeholder {
     padding: 32px;
     text-align: center;
@@ -491,75 +546,162 @@
     return Number(n).toLocaleString('zh-CN');
   }
 
-  // ============ 计算：达人维度 ============
+  // ============ 计算：达人维度（按 达人 × 商品 展开）============
   function computeTalent() {
-    const { cooperation_video, union_orders, talent_publish, ad_talent } = state.data;
+    const { cooperation_video, union_orders, talent_publish, ad_talent, ad_product } = state.data;
 
-    // 收集所有出现的达人昵称（去重）
+    // 全局商品名字典（跨乘方推广 + 精选联盟）
+    const productName = new Map();
+    for (const r of ad_product) {
+      const pid = String(r['商品ID'] || '').trim();
+      if (pid && r['商品名称'] && !productName.has(pid)) productName.set(pid, r['商品名称']);
+    }
+    for (const r of union_orders) {
+      const pid = String(r['商品id'] || '').trim();
+      if (pid && r['商品名称'] && !productName.has(pid)) productName.set(pid, r['商品名称']);
+    }
+    // 用于按商品反查发布条数（与商品维度共用逻辑）
+    const nameToId = new Map();
+    for (const r of ad_product) {
+      const pid = String(r['商品ID'] || '').trim();
+      const nm = (r['商品名称'] || '').trim();
+      if (pid && nm && !nameToId.has(nm)) nameToId.set(nm, pid);
+    }
+    function lookupPid(pub) {
+      const direct = String(pub['商品ID'] || '').trim();
+      if (direct) return direct;
+      const sn = (pub['产品名称'] || '').trim();
+      if (!sn) return null;
+      if (nameToId.has(sn)) return nameToId.get(sn);
+      for (const [longName, pid] of nameToId) {
+        if (longName.includes(sn)) return pid;
+      }
+      return null;
+    }
+
+    // 合作达人 = 乘方推广-达人(4账号合并) 里出现的达人（去重，只看真正投流的）
     const talents = new Set();
-    talent_publish.forEach(r => r['达人昵称'] && talents.add(r['达人昵称']));
-    cooperation_video.forEach(r => r['达人昵称'] && talents.add(r['达人昵称']));
     ad_talent.forEach(r => r['抖音号名称'] && talents.add(r['抖音号名称']));
-    union_orders.forEach(r => r['作者账号'] && talents.add(r['作者账号']));
 
     const rows = [];
+
     for (const name of talents) {
-      // ② 当月发布条数 = 达人发布明细表 月份='4月' 该达人 count
-      const publishCount = talent_publish.filter(
-        r => r['达人昵称'] === name && r['月份'] === '4月'
+      // ===== 达人级别（4 个汇总值）=====
+      // 当月发布条数 = 合作视频明细表 4 月发布的该达人视频数（抖店实际导出，比达人发布明细表准）
+      const publishCount = cooperation_video.filter(
+        r => r['达人昵称'] === name && isApril(r['发布时间'])
       ).length;
 
-      // ③ GSV = 精选联盟 流量来源='视频' sum(支付金额)
-      const gsv = union_orders
-        .filter(r => r['作者账号'] === name && r['流量来源'] === '视频')
-        .reduce((s, r) => s + num(r['支付金额']), 0);
-
-      // ④ 达人合计GSV = 精选联盟 不限流量来源 sum(支付金额)
       const gsvTotal = union_orders
         .filter(r => r['作者账号'] === name)
         .reduce((s, r) => s + num(r['支付金额']), 0);
 
-      // ⑤ 当月发布素材投放消耗 = 合作视频 4月发布 sum(投放消耗)
       const adCostThisMonth = cooperation_video
         .filter(r => r['达人昵称'] === name && isApril(r['发布时间']))
         .reduce((s, r) => s + num(r['投放消耗(元)']), 0);
 
-      // ⑥ 投放消耗(含非当月) = 乘方推广-达人 4 账号合并 日期='全部' sum(整体消耗)
       const adCostTotal = ad_talent
         .filter(r => r['抖音号名称'] === name && r['日期'] === '全部')
         .reduce((s, r) => s + num(r['整体消耗']), 0);
 
-      // 跳过完全无数据的达人（4 个数值都为 0 且未发布）
-      if (publishCount === 0 && gsv === 0 && gsvTotal === 0 && adCostThisMonth === 0 && adCostTotal === 0) {
-        continue;
-      }
+      // 跳过完全无数据的达人
+      if (publishCount === 0 && gsvTotal === 0 && adCostThisMonth === 0 && adCostTotal === 0) continue;
 
+      // ===== 商品级别 =====
+      // 该达人在合作视频里带货过的商品ID（去重，从带货商品ID列）
+      const pidsFromVideo = new Set();
+      cooperation_video
+        .filter(r => r['达人昵称'] === name)
+        .forEach(r => {
+          const pid = String(r['带货商品ID'] || '').trim();
+          if (pid) pidsFromVideo.add(pid);
+        });
+      // 也加入该达人在达人发布明细里发布过的商品ID（反查）
+      talent_publish
+        .filter(r => r['达人昵称'] === name && r['月份'] === '4月')
+        .forEach(r => {
+          const pid = lookupPid(r);
+          if (pid) pidsFromVideo.add(pid);
+        });
+
+      // 计算每个商品的子行
+      const items = [];
+      for (const pid of pidsFromVideo) {
+        const gsv = union_orders
+          .filter(r => r['作者账号'] === name && String(r['商品id']) === pid)
+          .reduce((s, r) => s + num(r['支付金额']), 0);
+        // 按商品的发布条数 = 合作视频明细表 4 月发布 + 带货商品ID 匹配
+        const pubCount = cooperation_video
+          .filter(r => r['达人昵称'] === name && isApril(r['发布时间']) && String(r['带货商品ID']) === pid)
+          .length;
+        // 子行只在 gsv > 0 或 pubCount > 0 时才显示
+        if (gsv === 0 && pubCount === 0) continue;
+        items.push({
+          pid,
+          productName: productName.get(pid) || '(未知商品)',
+          gsv,
+          publishCount: pubCount,
+        });
+      }
+      items.sort((a, b) => b.gsv - a.gsv);
+
+      // ===== 输出主行 + 子行 =====
+      // 主行：达人名 + 4 个汇总值（GSV 列为空）
       rows.push({
+        _type: 'header',
         name,
+        pid: '',
+        productName: '',
         publishCount,
-        gsv,
+        gsv: null,            // 主行无 GSV（按商品拆）
         gsvTotal,
         adCostThisMonth,
         adCostTotal,
       });
+      // 子行：商品ID + 商品名 + 按商品的 GSV + 按商品的发布条数
+      for (const it of items) {
+        rows.push({
+          _type: 'item',
+          name: '',
+          pid: it.pid,
+          productName: it.productName,
+          publishCount: it.publishCount,
+          gsv: it.gsv,
+          gsvTotal: null,
+          adCostThisMonth: null,
+          adCostTotal: null,
+        });
+      }
     }
 
-    // 按 达人合计GSV 降序排序
-    rows.sort((a, b) => b.gsvTotal - a.gsvTotal);
+    // 按主行（达人）合计GSV 排序：先把 header 抽出来排，再插回子行
+    const headers = rows.filter(r => r._type === 'header');
+    headers.sort((a, b) => b.gsvTotal - a.gsvTotal);
+    const sorted = [];
+    for (const h of headers) {
+      sorted.push(h);
+      // 找出紧跟该 header 的子行（在原 rows 里的顺序）
+      const origIdx = rows.indexOf(h);
+      for (let i = origIdx + 1; i < rows.length && rows[i]._type === 'item'; i++) {
+        sorted.push(rows[i]);
+      }
+    }
 
     // 合计行
     const total = {
+      _type: 'total',
       name: '合计',
-      publishCount: rows.reduce((s, r) => s + r.publishCount, 0),
-      gsv: rows.reduce((s, r) => s + r.gsv, 0),
-      gsvTotal: rows.reduce((s, r) => s + r.gsvTotal, 0),
-      adCostThisMonth: rows.reduce((s, r) => s + r.adCostThisMonth, 0),
-      adCostTotal: rows.reduce((s, r) => s + r.adCostTotal, 0),
-      _isTotal: true,
+      pid: '',
+      productName: '',
+      publishCount: headers.reduce((s, r) => s + r.publishCount, 0),
+      gsv: null,
+      gsvTotal: headers.reduce((s, r) => s + r.gsvTotal, 0),
+      adCostThisMonth: headers.reduce((s, r) => s + r.adCostThisMonth, 0),
+      adCostTotal: headers.reduce((s, r) => s + r.adCostTotal, 0),
     };
-    rows.push(total);
+    sorted.push(total);
 
-    return rows;
+    return sorted;
   }
 
   // ============ 计算：商品维度 ============
@@ -673,11 +815,22 @@
 
   // ============ 重新计算入口 ============
   function recompute() {
+    state.talent = [];
+    state.product = [];
+    let productResult = { rows: [], unmapped: 0 };
     // 至少要有这些表才能算
-    if (state.data.union_orders.length === 0) return;
-    state.talent = computeTalent();
-    const productResult = computeProduct();
-    state.product = productResult.rows;
+    if (state.data.union_orders.length > 0 || state.data.ad_product.length > 0) {
+      state.talent = computeTalent();
+      productResult = computeProduct();
+      state.product = productResult.rows;
+    }
+
+    if (state.talent.length === 0 && state.product.length === 0) {
+      renderTalentTable();
+      renderProductTable();
+      btnExport.disabled = true;
+      return;
+    }
 
     console.log('=== 达人维度 (前 5 + 合计) ===');
     console.table(state.talent.slice(0, 5).concat(state.talent[state.talent.length - 1]).map(r => ({
@@ -702,6 +855,165 @@
     if (productResult.unmapped > 0) {
       console.warn(`⚠️ 达人发布明细表中 ${productResult.unmapped} 条 4月记录无法反查到商品ID（产品名不在乘方推广表中出现）`);
     }
+
+    renderTalentTable();
+    renderProductTable();
+    btnExport.disabled = state.talent.length === 0 && state.product.length === 0;
+  }
+
+  // ============ 渲染：达人维度表（主行 + 商品子行）============
+  function renderTalentTable() {
+    const el = document.getElementById('table-talent');
+    if (!state.talent.length) {
+      el.className = 'placeholder';
+      el.innerHTML = '上传文件后自动生成';
+      return;
+    }
+    el.className = '';
+    const html = `
+      <table>
+        <thead>
+          <tr>
+            <th>达人昵称</th>
+            <th class="num">当月发布条数</th>
+            <th>商品ID</th>
+            <th>商品名称</th>
+            <th class="num">GSV<span style="font-weight:normal;color:#999;font-size:11px">（按商品）</span></th>
+            <th class="num">达人合计GSV</th>
+            <th class="num">当月发布素材投放消耗</th>
+            <th class="num">投放消耗（含非当月）</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${state.talent.map(r => {
+            const cls = r._type === 'total' ? 'total' : (r._type === 'header' ? 'talent-header' : 'talent-item');
+            return `
+              <tr class="${cls}">
+                <td>${r._type === 'item' ? '' : escapeHtml(r.name)}</td>
+                <td class="num">${r.publishCount != null ? (r.publishCount ? fmtInt(r.publishCount) : '0') : ''}</td>
+                <td style="font-family: ui-monospace, monospace; font-size: 12px;">${escapeHtml(r.pid || '')}</td>
+                <td title="${escapeHtml(r.productName || '')}">${escapeHtml((r.productName || '').substring(0, 28))}${r.productName && r.productName.length > 28 ? '…' : ''}</td>
+                <td class="num">${r.gsv != null ? fmtMoney(r.gsv) : ''}</td>
+                <td class="num">${r.gsvTotal != null ? fmtMoney(r.gsvTotal) : ''}</td>
+                <td class="num">${r.adCostThisMonth != null ? (r.adCostThisMonth ? fmtMoney(r.adCostThisMonth) : '-') : ''}</td>
+                <td class="num">${r.adCostTotal != null ? (r.adCostTotal ? fmtMoney(r.adCostTotal) : '-') : ''}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+    el.innerHTML = html;
+  }
+
+  // ============ 渲染：商品维度表 ============
+  function renderProductTable() {
+    const el = document.getElementById('table-product');
+    if (!state.product.length) {
+      el.className = 'placeholder';
+      el.innerHTML = '上传文件后自动生成';
+      return;
+    }
+    el.className = '';
+    const html = `
+      <table>
+        <thead>
+          <tr>
+            <th>分类<span style="font-weight:normal;color:#d48806;font-size:11px">（可编辑）</span></th>
+            <th>商品名称</th>
+            <th>商品ID</th>
+            <th class="num">客单价<span style="font-weight:normal;color:#d48806;font-size:11px">（可编辑）</span></th>
+            <th class="num">4月素材发布条数</th>
+            <th class="num">投放消耗</th>
+            <th class="num">净成交金额</th>
+            <th class="num">ROI</th>
+            <th>主要产出视频链接</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${state.product.map((r, i) => {
+            if (r._isTotal) {
+              return `
+                <tr class="total">
+                  <td>${escapeHtml(r.name)}</td>
+                  <td colspan="3"></td>
+                  <td class="num">${fmtInt(r.publishCount)}</td>
+                  <td class="num">${fmtMoney(r.adCost)}</td>
+                  <td class="num">${fmtMoney(r.netSales)}</td>
+                  <td class="num">${r.roi == null ? '-' : r.roi.toFixed(2)}</td>
+                  <td></td>
+                </tr>
+              `;
+            }
+            return `
+              <tr>
+                <td class="editable" data-i="${i}" data-field="category">${escapeHtml(r.category || '')}</td>
+                <td title="${escapeHtml(r.name)}">${escapeHtml((r.name || '').substring(0, 30))}${r.name && r.name.length > 30 ? '…' : ''}</td>
+                <td style="font-family: ui-monospace, monospace; font-size: 12px;">${escapeHtml(r.pid)}</td>
+                <td class="num editable" data-i="${i}" data-field="unitPrice">${r.unitPrice == null ? '' : r.unitPrice}</td>
+                <td class="num">${r.publishCount ? fmtInt(r.publishCount) : '<span class="empty">-</span>'}</td>
+                <td class="num">${r.adCost ? fmtMoney(r.adCost) : '<span class="empty">-</span>'}</td>
+                <td class="num">${r.netSales ? fmtMoney(r.netSales) : '<span class="empty">-</span>'}</td>
+                <td class="num">${r.roi == null ? '<span class="empty">-</span>' : r.roi.toFixed(2)}</td>
+                <td class="video-links">
+                  ${r.topVideos.length === 0 ? '<span class="empty">-</span>' : r.topVideos.map(v => `
+                    <a href="${escapeHtml(v.link || '#')}" target="_blank" title="${escapeHtml(v.talent || '')} ¥${v.sales.toFixed(0)}">
+                      ${escapeHtml((v.talent || '').substring(0, 12))}<span class="sales">¥${v.sales >= 10000 ? (v.sales/10000).toFixed(1)+'万' : v.sales.toFixed(0)}</span>
+                    </a>
+                  `).join('')}
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+    el.innerHTML = html;
+
+    // 绑定 inline 编辑
+    document.querySelectorAll('#table-product .editable').forEach(td => {
+      td.addEventListener('click', () => startEdit(td));
+    });
+  }
+
+  // ============ inline 编辑 ============
+  function startEdit(td) {
+    if (td.querySelector('input')) return; // 已在编辑
+    const i = +td.dataset.i;
+    const field = td.dataset.field;
+    const cur = state.product[i][field];
+    const isNum = field === 'unitPrice';
+
+    const input = document.createElement('input');
+    input.type = isNum ? 'number' : 'text';
+    if (isNum) {
+      input.step = '0.01';
+      input.classList.add('num-input');
+    }
+    input.value = cur == null ? '' : cur;
+    td.innerHTML = '';
+    td.appendChild(input);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const commit = () => {
+      if (done) return;
+      done = true;
+      let v = input.value.trim();
+      if (isNum) {
+        v = v === '' ? null : parseFloat(v);
+        if (isNum && isNaN(v)) v = null;
+      }
+      state.product[i][field] = v;
+      console.log(`✎ 编辑: ${state.product[i].name} [${field}] = ${v}`);
+      renderProductTable(); // 重渲染该表
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { input.blur(); }
+      if (e.key === 'Escape') { done = true; renderProductTable(); }
+    });
   }
 
   // ============ 健康检查 ============

@@ -86,11 +86,11 @@
         "表头固定（sticky）便于长表查看"
       ],
       "priority": 5,
-      "status": "pending",
+      "status": "completed",
       "depends_on": [3, 4],
-      "started_at": null,
-      "completed_at": null,
-      "notes": ""
+      "started_at": "2026-05-24T17:55:00+08:00",
+      "completed_at": "2026-05-24T18:30:00+08:00",
+      "notes": "达人维度按 (达人×商品) 展开（127 主行 + 286 子行）；商品维度 17 行。商品维度分类/客单价 inline 编辑可用。健康检查全部自洽（主行/子项 GSV、合计/sum 完全相等）。"
     },
     {
       "id": 6,
