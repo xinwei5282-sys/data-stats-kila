@@ -50,11 +50,11 @@
         "结果有合计行"
       ],
       "priority": 3,
-      "status": "pending",
+      "status": "completed",
       "depends_on": [2],
-      "started_at": null,
-      "completed_at": null,
-      "notes": ""
+      "started_at": "2026-05-24T17:30:00+08:00",
+      "completed_at": "2026-05-24T17:50:00+08:00",
+      "notes": "node 验证通过：姐夫嘎嘎会吃 当月发布投放消耗 1096.98 ✓ / 投放消耗(含非当月) 163158.75 ✓。902 个达人按合计GSV降序排列，有合计行。与 task 4 共享工具函数，合并一次 commit。"
     },
     {
       "id": 4,
@@ -68,11 +68,11 @@
         "主要产出视频链接最多取前 3 条"
       ],
       "priority": 4,
-      "status": "pending",
+      "status": "completed",
       "depends_on": [2],
-      "started_at": null,
-      "completed_at": null,
-      "notes": ""
+      "started_at": "2026-05-24T17:30:00+08:00",
+      "completed_at": "2026-05-24T17:50:00+08:00",
+      "notes": "node 验证通过：17 个商品自动从乘方推广-产品表列出，ROI 3.20-3.80 合理。商品反查 4 条失败（涉及'香煎鸡腿排'/'夜宵组合'，乘方推广里没有这两个产品）。与 task 3 共享代码合并 commit。"
     },
     {
       "id": 5,

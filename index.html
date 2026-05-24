@@ -408,6 +408,7 @@
       Object.entries(state.data).map(([k, v]) => [TYPES[k].label, v.length])
     ));
     renderSummary();
+    recompute();
   }
 
   // ============ 文件列表 UI ============
@@ -462,6 +463,245 @@
     return String(s).replace(/[&<>"']/g, c => ({
       '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
     })[c]);
+  }
+
+  // ============ 工具函数 ============
+  // 抖店导出的数字字段经常带千分位逗号 / 百分号 → 必须清洗
+  function num(v) {
+    if (v == null) return 0;
+    if (typeof v === 'number') return v;
+    const s = String(v).replace(/,/g, '').replace(/%/g, '').trim();
+    const n = parseFloat(s);
+    return isNaN(n) ? 0 : n;
+  }
+
+  // 判断"发布时间"字符串是否在 4 月（兼容 2026-04 / 2026/04 / 2026/4/ 多种格式）
+  function isApril(dateStr) {
+    if (!dateStr) return false;
+    const s = String(dateStr);
+    return s.startsWith('2026-04') || s.startsWith('2026/04') || s.startsWith('2026/4/');
+  }
+
+  function fmtMoney(n) {
+    if (n === '-' || n == null) return '-';
+    return Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function fmtInt(n) {
+    if (n === '-' || n == null) return '-';
+    return Number(n).toLocaleString('zh-CN');
+  }
+
+  // ============ 计算：达人维度 ============
+  function computeTalent() {
+    const { cooperation_video, union_orders, talent_publish, ad_talent } = state.data;
+
+    // 收集所有出现的达人昵称（去重）
+    const talents = new Set();
+    talent_publish.forEach(r => r['达人昵称'] && talents.add(r['达人昵称']));
+    cooperation_video.forEach(r => r['达人昵称'] && talents.add(r['达人昵称']));
+    ad_talent.forEach(r => r['抖音号名称'] && talents.add(r['抖音号名称']));
+    union_orders.forEach(r => r['作者账号'] && talents.add(r['作者账号']));
+
+    const rows = [];
+    for (const name of talents) {
+      // ② 当月发布条数 = 达人发布明细表 月份='4月' 该达人 count
+      const publishCount = talent_publish.filter(
+        r => r['达人昵称'] === name && r['月份'] === '4月'
+      ).length;
+
+      // ③ GSV = 精选联盟 流量来源='视频' sum(支付金额)
+      const gsv = union_orders
+        .filter(r => r['作者账号'] === name && r['流量来源'] === '视频')
+        .reduce((s, r) => s + num(r['支付金额']), 0);
+
+      // ④ 达人合计GSV = 精选联盟 不限流量来源 sum(支付金额)
+      const gsvTotal = union_orders
+        .filter(r => r['作者账号'] === name)
+        .reduce((s, r) => s + num(r['支付金额']), 0);
+
+      // ⑤ 当月发布素材投放消耗 = 合作视频 4月发布 sum(投放消耗)
+      const adCostThisMonth = cooperation_video
+        .filter(r => r['达人昵称'] === name && isApril(r['发布时间']))
+        .reduce((s, r) => s + num(r['投放消耗(元)']), 0);
+
+      // ⑥ 投放消耗(含非当月) = 乘方推广-达人 4 账号合并 日期='全部' sum(整体消耗)
+      const adCostTotal = ad_talent
+        .filter(r => r['抖音号名称'] === name && r['日期'] === '全部')
+        .reduce((s, r) => s + num(r['整体消耗']), 0);
+
+      // 跳过完全无数据的达人（4 个数值都为 0 且未发布）
+      if (publishCount === 0 && gsv === 0 && gsvTotal === 0 && adCostThisMonth === 0 && adCostTotal === 0) {
+        continue;
+      }
+
+      rows.push({
+        name,
+        publishCount,
+        gsv,
+        gsvTotal,
+        adCostThisMonth,
+        adCostTotal,
+      });
+    }
+
+    // 按 达人合计GSV 降序排序
+    rows.sort((a, b) => b.gsvTotal - a.gsvTotal);
+
+    // 合计行
+    const total = {
+      name: '合计',
+      publishCount: rows.reduce((s, r) => s + r.publishCount, 0),
+      gsv: rows.reduce((s, r) => s + r.gsv, 0),
+      gsvTotal: rows.reduce((s, r) => s + r.gsvTotal, 0),
+      adCostThisMonth: rows.reduce((s, r) => s + r.adCostThisMonth, 0),
+      adCostTotal: rows.reduce((s, r) => s + r.adCostTotal, 0),
+      _isTotal: true,
+    };
+    rows.push(total);
+
+    return rows;
+  }
+
+  // ============ 计算：商品维度 ============
+  function computeProduct() {
+    const { cooperation_video, talent_publish, ad_product } = state.data;
+
+    // 从乘方推广-产品表收集商品（去重），同时建立 商品ID→商品名称 字典
+    const productMap = new Map(); // pid → { name, ... }
+    const nameToId = new Map();   // 商品名称 → pid（用于反查达人发布表里没填商品ID的行）
+    for (const r of ad_product) {
+      const pid = String(r['商品ID'] || '').trim();
+      if (!pid) continue;
+      if (!productMap.has(pid)) {
+        productMap.set(pid, { pid, name: r['商品名称'] || '' });
+      }
+      // 商品名称反查字典：完整名 + 关键词
+      const nm = (r['商品名称'] || '').trim();
+      if (nm && !nameToId.has(nm)) nameToId.set(nm, pid);
+    }
+
+    // 反查达人发布明细的商品 ID
+    // 达人发布明细里"产品名称"是短名（如"奶酪鸡块"），乘方推广里是长名（如"【圣农】原汁原味肉多多鸡块小马奶酪鸡块..."）
+    // 用"短名包含于长名"作为反查规则
+    function lookupPid(pubRow) {
+      const directPid = String(pubRow['商品ID'] || '').trim();
+      if (directPid && productMap.has(directPid)) return directPid;
+      const shortName = (pubRow['产品名称'] || '').trim();
+      if (!shortName) return null;
+      // 精确匹配优先
+      if (nameToId.has(shortName)) return nameToId.get(shortName);
+      // 模糊：长名包含短名
+      for (const [longName, pid] of nameToId) {
+        if (longName.includes(shortName)) return pid;
+      }
+      return null;
+    }
+
+    const rows = [];
+    let unmapped = 0;  // 反查失败的发布记录数
+
+    for (const [pid, p] of productMap) {
+      // ⑤ 4月素材发布条数 = 达人发布明细 月份='4月' 商品ID=该商品 count
+      let publishCount = 0;
+      for (const pub of talent_publish) {
+        if (pub['月份'] !== '4月') continue;
+        if (lookupPid(pub) === pid) publishCount++;
+      }
+
+      // ⑥ 投放消耗 = 乘方推广-产品 4 账号合并 日期='全部' sum(整体消耗)
+      const adCost = ad_product
+        .filter(r => String(r['商品ID']) === pid && r['日期'] === '全部')
+        .reduce((s, r) => s + num(r['整体消耗']), 0);
+
+      // ⑦ 净成交金额 = 乘方推广-产品 4 账号合并 日期='全部' sum(净成交金额)
+      const netSales = ad_product
+        .filter(r => String(r['商品ID']) === pid && r['日期'] === '全部')
+        .reduce((s, r) => s + num(r['净成交金额']), 0);
+
+      // ⑧ ROI = 净成交金额 / 投放消耗
+      const roi = adCost > 0 ? (netSales / adCost) : null;
+
+      // ⑨ 主要产出视频链接 = 合作视频 该商品ID 按 用户支付金额(元) 降序 top 3
+      const topVideos = cooperation_video
+        .filter(r => String(r['带货商品ID']) === pid)
+        .sort((a, b) => num(b['用户支付金额(元)']) - num(a['用户支付金额(元)']))
+        .slice(0, 3)
+        .map(r => ({
+          link: r['播放链接'],
+          sales: num(r['用户支付金额(元)']),
+          talent: r['达人昵称'],
+        }));
+
+      rows.push({
+        pid,
+        name: p.name,
+        category: '',        // 手编（task 6 接 localStorage）
+        unitPrice: null,     // 手编
+        publishCount,
+        adCost,
+        netSales,
+        roi,
+        topVideos,
+      });
+    }
+
+    // 统计反查失败数
+    for (const pub of talent_publish) {
+      if (pub['月份'] !== '4月') continue;
+      if (!lookupPid(pub)) unmapped++;
+    }
+
+    // 按净成交金额降序
+    rows.sort((a, b) => b.netSales - a.netSales);
+
+    // 合计行
+    const total = {
+      pid: '', name: '合计', category: '', unitPrice: null,
+      publishCount: rows.reduce((s, r) => s + r.publishCount, 0),
+      adCost: rows.reduce((s, r) => s + r.adCost, 0),
+      netSales: rows.reduce((s, r) => s + r.netSales, 0),
+      roi: null,
+      topVideos: [],
+      _isTotal: true,
+    };
+    const totalCost = total.adCost;
+    total.roi = totalCost > 0 ? total.netSales / totalCost : null;
+    rows.push(total);
+
+    return { rows, unmapped };
+  }
+
+  // ============ 重新计算入口 ============
+  function recompute() {
+    // 至少要有这些表才能算
+    if (state.data.union_orders.length === 0) return;
+    state.talent = computeTalent();
+    const productResult = computeProduct();
+    state.product = productResult.rows;
+
+    console.log('=== 达人维度 (前 5 + 合计) ===');
+    console.table(state.talent.slice(0, 5).concat(state.talent[state.talent.length - 1]).map(r => ({
+      达人: r.name,
+      发布数: r.publishCount,
+      GSV: fmtMoney(r.gsv),
+      合计GSV: fmtMoney(r.gsvTotal),
+      投放消耗_当月: fmtMoney(r.adCostThisMonth),
+      投放消耗_含非当月: fmtMoney(r.adCostTotal),
+    })));
+
+    console.log('=== 商品维度 (前 5 + 合计) ===');
+    console.table(state.product.slice(0, 5).concat(state.product[state.product.length - 1]).map(r => ({
+      商品ID: r.pid,
+      商品名: (r.name || '').substring(0, 20),
+      发布数: r.publishCount,
+      投放消耗: fmtMoney(r.adCost),
+      净成交金额: fmtMoney(r.netSales),
+      ROI: r.roi == null ? '-' : r.roi.toFixed(2),
+      产出视频数: r.topVideos.length,
+    })));
+    if (productResult.unmapped > 0) {
+      console.warn(`⚠️ 达人发布明细表中 ${productResult.unmapped} 条 4月记录无法反查到商品ID（产品名不在乘方推广表中出现）`);
+    }
   }
 
   // ============ 健康检查 ============
