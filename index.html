@@ -367,6 +367,14 @@
     renderFileList();
   });
 
+  btnExport.addEventListener('click', () => {
+    if (!state.talent.length && !state.product.length) {
+      alert('请先上传 Excel 文件');
+      return;
+    }
+    exportToExcel();
+  });
+
   btnClearMeta.addEventListener('click', () => {
     const meta = loadProductMeta();
     const n = Object.keys(meta).length;
@@ -1071,6 +1079,59 @@
       if (e.key === 'Enter') { input.blur(); }
       if (e.key === 'Escape') { done = true; renderProductTable(); }
     });
+  }
+
+  // ============ 导出 Excel ============
+  function exportToExcel() {
+    const wb = XLSX.utils.book_new();
+
+    // —— Sheet 1: 达人维度 ——
+    const talentRows = state.talent.map(r => ({
+      '达人昵称':              r.name || '',
+      '当月发布条数':          r.publishCount != null ? r.publishCount : '',
+      '商品ID':                r.pid || '',
+      '商品名称':              r.productName || '',
+      'GSV（按商品）':         r.gsv != null ? Number(r.gsv.toFixed(2)) : '',
+      '达人合计GSV':           r.gsvTotal != null ? Number(r.gsvTotal.toFixed(2)) : '',
+      '当月发布素材投放消耗':  r.adCostThisMonth != null ? Number(r.adCostThisMonth.toFixed(2)) : '',
+      '投放消耗（含非当月）':  r.adCostTotal != null ? Number(r.adCostTotal.toFixed(2)) : '',
+    }));
+    const ws1 = XLSX.utils.json_to_sheet(talentRows);
+    // 列宽
+    ws1['!cols'] = [
+      { wch: 18 }, { wch: 12 }, { wch: 22 }, { wch: 32 },
+      { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 20 },
+    ];
+    XLSX.utils.book_append_sheet(wb, ws1, '达人维度');
+
+    // —— Sheet 2: 商品维度 ——
+    const productRows = state.product.map(r => ({
+      '分类':              r.category || '',
+      '商品名称':          r.name || '',
+      '商品ID':            r.pid || '',
+      '客单价':            r.unitPrice != null ? Number(r.unitPrice) : '',
+      '4月素材发布条数':   r.publishCount || 0,
+      '投放消耗':          r.adCost != null ? Number(r.adCost.toFixed(2)) : '',
+      '净成交金额':        r.netSales != null ? Number(r.netSales.toFixed(2)) : '',
+      'ROI':               r.roi == null ? '-' : Number(r.roi.toFixed(2)),
+      '主要产出视频链接':  (r.topVideos || []).map(v =>
+        `${v.talent || ''} ¥${v.sales.toFixed(0)} ${v.link || ''}`
+      ).join('\n'),
+    }));
+    const ws2 = XLSX.utils.json_to_sheet(productRows);
+    ws2['!cols'] = [
+      { wch: 10 }, { wch: 32 }, { wch: 22 }, { wch: 10 },
+      { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 8 },
+      { wch: 60 },
+    ];
+    XLSX.utils.book_append_sheet(wb, ws2, '商品维度');
+
+    // 文件名 kila-数据汇总-YYYYMMDD.xlsx
+    const d = new Date();
+    const yyyymmdd = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+    const filename = `kila-数据汇总-${yyyymmdd}.xlsx`;
+    XLSX.writeFile(wb, filename);
+    console.log(`✓ 已导出 ${filename}（达人维度 ${talentRows.length} 行 / 商品维度 ${productRows.length} 行）`);
   }
 
   // ============ 健康检查 ============

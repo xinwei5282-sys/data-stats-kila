@@ -120,11 +120,11 @@
         "ROI 列若为 '-' 在 Excel 中也显示 '-' 不报错"
       ],
       "priority": 7,
-      "status": "pending",
+      "status": "completed",
       "depends_on": [5],
-      "started_at": null,
-      "completed_at": null,
-      "notes": ""
+      "started_at": "2026-05-24T18:43:00+08:00",
+      "completed_at": "2026-05-24T18:50:00+08:00",
+      "notes": "导出 kila-数据汇总-YYYYMMDD.xlsx，两个 sheet（达人维度/商品维度）。node 端验证：数值字段是 number 类型（可在 Excel 二次计算），文件 17.9KB 结构正确。"
     },
     {
       "id": 8,
