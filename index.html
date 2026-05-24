@@ -575,6 +575,39 @@
     saveProductMeta(meta);
   }
 
+  // —— 达人手编值（按 达人昵称 持久化）——
+  const TALENT_META_KEY = 'kila-stats:talent-meta';
+
+  function loadTalentMeta() {
+    try {
+      const raw = localStorage.getItem(TALENT_META_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      console.warn('读取达人手编值失败', e);
+      return {};
+    }
+  }
+
+  function saveTalentMeta(meta) {
+    try {
+      localStorage.setItem(TALENT_META_KEY, JSON.stringify(meta));
+    } catch (e) {
+      console.error('保存达人手编值失败', e);
+    }
+  }
+
+  function updateTalentMeta(name, field, value) {
+    const meta = loadTalentMeta();
+    if (!meta[name]) meta[name] = {};
+    if (value == null || value === '') {
+      delete meta[name][field];
+      if (Object.keys(meta[name]).length === 0) delete meta[name];
+    } else {
+      meta[name][field] = value;
+    }
+    saveTalentMeta(meta);
+  }
+
   // ============ 工具函数 ============
   // 抖店导出的数字字段经常带千分位逗号 / 百分号 → 必须清洗
   function num(v) {
@@ -638,6 +671,14 @@
     const talents = new Set();
     ad_talent.forEach(r => r['抖音号名称'] && talents.add(r['抖音号名称']));
 
+    // 对接人字典：达人昵称 → 对接人（从 达人发布明细表 抽取，取首个非空值）
+    const contactMap = new Map();
+    for (const r of talent_publish) {
+      const name = (r['达人昵称'] || '').trim();
+      const contact = (r['对接人'] || '').trim();
+      if (name && contact && !contactMap.has(name)) contactMap.set(name, contact);
+    }
+
     const rows = [];
 
     for (const name of talents) {
@@ -649,7 +690,7 @@
 
       const gsvTotal = union_orders
         .filter(r => r['作者账号'] === name)
-        .reduce((s, r) => s + num(r['支付金额']), 0);
+        .reduce((s, r) => s + num(r['支付金额']) - num(r['订单退货退款']), 0);
 
       const adCostThisMonth = cooperation_video
         .filter(r => r['达人昵称'] === name && isApril(r['发布时间']))
@@ -684,11 +725,17 @@
       for (const pid of pidsFromVideo) {
         const gsv = union_orders
           .filter(r => r['作者账号'] === name && String(r['商品id']) === pid)
-          .reduce((s, r) => s + num(r['支付金额']), 0);
+          .reduce((s, r) => s + num(r['支付金额']) - num(r['订单退货退款']), 0);
         // 按商品的发布条数 = 合作视频明细表 4 月发布 + 带货商品ID 匹配
-        const pubCount = cooperation_video
-          .filter(r => r['达人昵称'] === name && isApril(r['发布时间']) && String(r['带货商品ID']) === pid)
-          .length;
+        const videosOfProductApr = cooperation_video
+          .filter(r => r['达人昵称'] === name && isApril(r['发布时间']) && String(r['带货商品ID']) === pid);
+        const pubCount = videosOfProductApr.length;
+        // 按商品的当月投放消耗 = 该达人 × 该商品 4月发布视频 sum(投放消耗(元))
+        const pubCost = videosOfProductApr.reduce((s, r) => s + num(r['投放消耗(元)']), 0);
+        // 按商品的含非当月投放消耗 = 该达人 × 该商品 全部时间 sum(投放消耗(元))
+        const pubCostAll = cooperation_video
+          .filter(r => r['达人昵称'] === name && String(r['带货商品ID']) === pid)
+          .reduce((s, r) => s + num(r['投放消耗(元)']), 0);
         // 子行只在 gsv > 0 或 pubCount > 0 时才显示
         if (gsv === 0 && pubCount === 0) continue;
         items.push({
@@ -696,6 +743,8 @@
           productName: productName.get(pid) || '(未知商品)',
           gsv,
           publishCount: pubCount,
+          adCostThisMonth: pubCost,
+          adCostTotal: pubCostAll,
         });
       }
       items.sort((a, b) => b.gsv - a.gsv);
@@ -705,6 +754,7 @@
       rows.push({
         _type: 'header',
         name,
+        contact: contactMap.get(name) || '',  // 自动从发布明细表带出，localStorage 手编值后面覆盖
         pid: '',
         productName: '',
         publishCount,
@@ -713,18 +763,19 @@
         adCostThisMonth,
         adCostTotal,
       });
-      // 子行：商品ID + 商品名 + 按商品的 GSV + 按商品的发布条数
+      // 子行：商品ID + 商品名 + 按商品的 GSV + 按商品的发布条数 + 按商品的投放消耗（当月 / 含非当月）
       for (const it of items) {
         rows.push({
           _type: 'item',
           name: '',
+          contact: null,
           pid: it.pid,
           productName: it.productName,
           publishCount: it.publishCount,
           gsv: it.gsv,
           gsvTotal: null,
-          adCostThisMonth: null,
-          adCostTotal: null,
+          adCostThisMonth: it.adCostThisMonth,
+          adCostTotal: it.adCostTotal,
         });
       }
     }
@@ -746,6 +797,7 @@
     const total = {
       _type: 'total',
       name: '合计',
+      contact: null,
       pid: '',
       productName: '',
       publishCount: headers.reduce((s, r) => s + r.publishCount, 0),
@@ -755,6 +807,14 @@
       adCostTotal: headers.reduce((s, r) => s + r.adCostTotal, 0),
     };
     sorted.push(total);
+
+    // 从 localStorage 回填手编对接人（按 达人昵称 匹配）
+    const talentMeta = loadTalentMeta();
+    for (const r of sorted) {
+      if (r._type === 'header' && talentMeta[r.name]?.contact != null) {
+        r.contact = talentMeta[r.name].contact;
+      }
+    }
 
     return sorted;
   }
@@ -939,6 +999,7 @@
         <thead>
           <tr>
             <th>达人昵称</th>
+            <th>对接人<span style="font-weight:normal;color:#d48806;font-size:11px">（可编辑）</span></th>
             <th class="num">当月发布条数</th>
             <th>商品ID</th>
             <th>商品名称</th>
@@ -949,11 +1010,15 @@
           </tr>
         </thead>
         <tbody>
-          ${state.talent.map(r => {
+          ${state.talent.map((r, i) => {
             const cls = r._type === 'total' ? 'total' : (r._type === 'header' ? 'talent-header' : 'talent-item');
+            const contactCell = r._type === 'header'
+              ? `<td class="editable" data-table="talent" data-i="${i}" data-field="contact">${escapeHtml(r.contact || '')}</td>`
+              : `<td></td>`;
             return `
               <tr class="${cls}">
                 <td>${r._type === 'item' ? '' : escapeHtml(r.name)}</td>
+                ${contactCell}
                 <td class="num">${r.publishCount != null ? (r.publishCount ? fmtInt(r.publishCount) : '0') : ''}</td>
                 <td style="font-family: ui-monospace, monospace; font-size: 12px;">${escapeHtml(r.pid || '')}</td>
                 <td title="${escapeHtml(r.productName || '')}">${escapeHtml((r.productName || '').substring(0, 28))}${r.productName && r.productName.length > 28 ? '…' : ''}</td>
@@ -968,6 +1033,11 @@
       </table>
     `;
     el.innerHTML = html;
+
+    // 绑定 inline 编辑
+    document.querySelectorAll('#table-talent .editable').forEach(td => {
+      td.addEventListener('click', () => startEdit(td));
+    });
   }
 
   // ============ 渲染：商品维度表 ============
@@ -1040,12 +1110,15 @@
     });
   }
 
-  // ============ inline 编辑 ============
+  // ============ inline 编辑（通用：product / talent）============
   function startEdit(td) {
     if (td.querySelector('input')) return; // 已在编辑
+    const table = td.dataset.table || 'product';
+    const stateArr = table === 'talent' ? state.talent : state.product;
+    const rerender = table === 'talent' ? renderTalentTable : renderProductTable;
     const i = +td.dataset.i;
     const field = td.dataset.field;
-    const cur = state.product[i][field];
+    const cur = stateArr[i][field];
     const isNum = field === 'unitPrice';
 
     const input = document.createElement('input');
@@ -1069,15 +1142,21 @@
         v = v === '' ? null : parseFloat(v);
         if (isNum && isNaN(v)) v = null;
       }
-      state.product[i][field] = v;
-      updateProductMeta(state.product[i].pid, field, v);  // 持久化到 localStorage
-      console.log(`✎ 编辑: ${state.product[i].name} [${field}] = ${v} (已存)`);
-      renderProductTable(); // 重渲染该表
+      stateArr[i][field] = v;
+      // 持久化到 localStorage
+      if (table === 'talent') {
+        updateTalentMeta(stateArr[i].name, field, v);
+        console.log(`✎ 编辑(达人): ${stateArr[i].name} [${field}] = ${v} (已存)`);
+      } else {
+        updateProductMeta(stateArr[i].pid, field, v);
+        console.log(`✎ 编辑(商品): ${stateArr[i].name} [${field}] = ${v} (已存)`);
+      }
+      rerender();
     };
     input.addEventListener('blur', commit);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { input.blur(); }
-      if (e.key === 'Escape') { done = true; renderProductTable(); }
+      if (e.key === 'Escape') { done = true; rerender(); }
     });
   }
 
@@ -1088,6 +1167,7 @@
     // —— Sheet 1: 达人维度 ——
     const talentRows = state.talent.map(r => ({
       '达人昵称':              r.name || '',
+      '对接人':                r.contact || '',
       '当月发布条数':          r.publishCount != null ? r.publishCount : '',
       '商品ID':                r.pid || '',
       '商品名称':              r.productName || '',
@@ -1099,7 +1179,7 @@
     const ws1 = XLSX.utils.json_to_sheet(talentRows);
     // 列宽
     ws1['!cols'] = [
-      { wch: 18 }, { wch: 12 }, { wch: 22 }, { wch: 32 },
+      { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 22 }, { wch: 32 },
       { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 20 },
     ];
     XLSX.utils.book_append_sheet(wb, ws1, '达人维度');
