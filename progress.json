@@ -1,0 +1,148 @@
+{
+  "project": "data-stats-kila",
+  "description": "纯本地 HTML 数据汇总统计页面：拖拽 5 个 Excel → 自动输出达人维度 + 商品维度两张统计表，商品分类/客单价可手编并 localStorage 持久化，支持导出 Excel",
+  "created_at": "2026-05-24T16:40:00+08:00",
+  "updated_at": "2026-05-24T16:40:00+08:00",
+  "tasks": [
+    {
+      "id": 1,
+      "title": "搭建项目骨架（index.html + CDN 依赖 + 基础布局）",
+      "description": "创建 index.html，通过 CDN 引入 SheetJS（xlsx.full.min.js）。布局分三块：① 拖拽上传区（展示已识别的文件列表和匹配状态）② 达人维度表占位 ③ 商品维度表占位。无构建工具，双击即可在浏览器打开。",
+      "acceptance_criteria": [
+        "index.html 存在，浏览器打开无控制台报错",
+        "页面三块布局清晰可见",
+        "拖拽区显示提示文字、支持鼠标拖入视觉反馈",
+        "SheetJS 通过 window.XLSX 可访问"
+      ],
+      "priority": 1,
+      "status": "pending",
+      "depends_on": [],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    {
+      "id": 2,
+      "title": "Excel 文件解析与识别（拖拽 + 文件名匹配 + SheetJS 读表）",
+      "description": "实现拖拽多个 xlsx 文件 → 用 SheetJS 解析 → 按文件名关键词识别每个文件属于哪类（合作视频明细表 / 精选联盟订单明细表 / 达人发布明细表 / 乘方推广-产品 / 乘方推广-达人）。识别后在 UI 上展示文件名 → 类型 → 行数。支持上传多份'乘方推广'表自动合并（汇总表注释里写了'乘方推广数据表为多表，但表头一致'）。",
+      "acceptance_criteria": [
+        "拖入 5 个示例 Excel 后，页面正确识别每个文件的类型",
+        "在控制台或页面上能看到每个表的行数",
+        "数据已结构化存到内存（数组/对象），可被后续计算逻辑访问",
+        "多份乘方推广表（产品/达人）会自动按类型合并到一份数组里",
+        "未识别的文件给出明确提示，不让流程崩"
+      ],
+      "priority": 2,
+      "status": "pending",
+      "depends_on": [1],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    {
+      "id": 3,
+      "title": "计算逻辑：达人维度统计",
+      "description": "按汇总表逻辑算出达人维度数据。每行一个达人，列：达人昵称 / 当月发布条数（来自达人发布明细表 group by 达人） / GSV（来自精选联盟订单 group by 作者账号 sum 支付金额） / 达人合计GSV（同 GSV 但含历史） / 当月发布素材投放消耗（合作视频明细表 group by 达人 sum 投放消耗） / 投放消耗含非当月（乘方推广-达人 sum 整体消耗）。需要先与用户确认 'GSV vs 达人合计GSV' 的精确口径（汇总表里这两列数值不同，需查清差异定义）。",
+      "acceptance_criteria": [
+        "计算函数输入是 task 2 产出的结构化数据，输出是达人维度数组",
+        "至少能与用户提供的汇总表 R13-R29 行做对照验证（至少 3 个达人数据吻合或差异原因可解释）",
+        "GSV / 达人合计GSV 的口径已与用户确认并文档化在 notes 字段",
+        "结果有合计行"
+      ],
+      "priority": 3,
+      "status": "pending",
+      "depends_on": [2],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    {
+      "id": 4,
+      "title": "计算逻辑：商品维度统计",
+      "description": "按汇总表逻辑算出商品维度数据。每行一个商品，列：分类（手编）/ 商品名称 / 商品ID / 客单价（手编）/ 4月素材发布条数（达人发布明细表 group by 商品） / 投放消耗（乘方推广-产品 sum 整体消耗） / 净成交金额（乘方推广-产品 sum 净成交金额） / ROI（净成交金额/投放消耗，分母 0 时显示 '-'）/ 主要产出视频链接（合作视频明细表 group by 商品ID 取支付金额最高的 1-3 个）。注意：达人发布明细表里大量行的'商品ID'为空，需通过'产品名称'反查商品ID（建立商品名→ID 字典）。",
+      "acceptance_criteria": [
+        "计算函数输入是 task 2 产出的结构化数据，输出是商品维度数组",
+        "ROI 计算无 #DIV/0 错误（除零时显示 '-' 或 '无投放消耗'）",
+        "至少与汇总表 R34-R48 做对照，关键商品（脆皮炸鸡、汁汁烤翅等）数据吻合",
+        "缺商品名→ID 映射的发布记录有兜底处理（不静默丢弃，给出警告）",
+        "主要产出视频链接最多取前 3 条"
+      ],
+      "priority": 4,
+      "status": "pending",
+      "depends_on": [2],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    {
+      "id": 5,
+      "title": "表格渲染（含商品维度可编辑字段）",
+      "description": "把 task 3 / task 4 的结果渲染成两张 HTML 表格。达人维度表只读。商品维度表的'分类'和'客单价'两列做 inline 编辑（点击单元格切换为 input/select，失焦保存）。表格样式简洁清晰，支持横向滚动。",
+      "acceptance_criteria": [
+        "两张表正确显示所有列和行",
+        "商品维度的'分类'和'客单价'单元格可点击编辑",
+        "编辑后值即时反映到内存数据中（控制台可验证）",
+        "数值列右对齐，金额带千分位",
+        "表头固定（sticky）便于长表查看"
+      ],
+      "priority": 5,
+      "status": "pending",
+      "depends_on": [3, 4],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    {
+      "id": 6,
+      "title": "localStorage 持久化（商品分类 / 客单价）",
+      "description": "把商品维度表里手编的'分类'和'客单价'按商品ID 为 key 存到 localStorage。下次打开页面或重新上传 Excel 时自动回填。提供'清空手编数据'按钮。",
+      "acceptance_criteria": [
+        "编辑分类/客单价后立即写 localStorage（key 形如 'kila-stats:product-meta'）",
+        "刷新页面后重新计算商品维度时，手编值自动回填",
+        "提供'清空手编数据'按钮，点击后二次确认再清",
+        "重新上传 Excel 不会丢失已手编的数据（按商品ID 匹配回填）"
+      ],
+      "priority": 6,
+      "status": "pending",
+      "depends_on": [5],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    {
+      "id": 7,
+      "title": "导出 Excel（.xlsx，两张表两个 sheet）",
+      "description": "用 SheetJS 把当前两张表导出为单个 .xlsx 文件，包含两个 sheet：'达人维度' 和 '商品维度'。文件名格式：'kila-数据汇总-{YYYYMMDD}.xlsx'。导出按钮放在页面顶部。",
+      "acceptance_criteria": [
+        "点击导出按钮下载 .xlsx 文件",
+        "文件包含两个 sheet，列顺序和表头与页面一致",
+        "数值字段在 Excel 中为数字类型（不是字符串），便于二次计算",
+        "ROI 列若为 '-' 在 Excel 中也显示 '-' 不报错"
+      ],
+      "priority": 7,
+      "status": "pending",
+      "depends_on": [5],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    },
+    {
+      "id": 8,
+      "title": "端到端验证（用真实 5 个 Excel 跑通，对照汇总表）",
+      "description": "用 /Users/weiran/Desktop/数据源-kila 里的 5 份真实数据完整跑一遍：上传 → 计算 → 渲染 → 编辑 → 导出。把页面的统计数据与用户原始'达人投放业绩统计表-汇总表.xlsx'的两张表逐项对照，列出差异并与用户确认口径。",
+      "acceptance_criteria": [
+        "5 份真实 Excel 拖入后无报错完整跑通",
+        "页面渲染的达人维度数据与汇总表 R13-R29 比对一致（或差异有明确原因）",
+        "页面渲染的商品维度数据与汇总表 R34-R48 比对一致（或差异有明确原因）",
+        "导出的 .xlsx 用 Excel 打开正常",
+        "对照报告写到 claude-progress.txt"
+      ],
+      "priority": 8,
+      "status": "pending",
+      "depends_on": [3, 4, 5, 6, 7],
+      "started_at": null,
+      "completed_at": null,
+      "notes": ""
+    }
+  ]
+}
