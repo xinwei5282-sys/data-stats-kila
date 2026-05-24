@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>kila 达人投放数据汇总</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root {
+    --bd: #d9d9d9;
+    --bg: #fafafa;
+    --primary: #1677ff;
+    --ok: #52c41a;
+    --warn: #faad14;
+    --err: #ff4d4f;
+    --muted: #8c8c8c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    margin: 0;
+    padding: 24px;
+    background: #f0f2f5;
+    color: #262626;
+    font-size: 14px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 20px; }
+  .panel {
+    background: #fff;
+    border: 1px solid var(--bd);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+  }
+  .panel-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .toolbar { display: flex; gap: 8px; }
+  button {
+    padding: 6px 14px;
+    border: 1px solid var(--bd);
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button:hover { border-color: var(--primary); color: var(--primary); }
+  button.primary {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+  button.primary:hover { opacity: 0.85; color: #fff; }
+  button:disabled {
+    background: #f5f5f5;
+    color: #bfbfbf;
+    cursor: not-allowed;
+    border-color: var(--bd);
+  }
+
+  /* 上传区 */
+  #drop-zone {
+    border: 2px dashed var(--bd);
+    border-radius: 8px;
+    padding: 32px;
+    text-align: center;
+    background: var(--bg);
+    transition: all 0.2s;
+    cursor: pointer;
+  }
+  #drop-zone.dragover {
+    border-color: var(--primary);
+    background: #e6f4ff;
+  }
+  #drop-zone .hint { color: var(--muted); margin-top: 8px; font-size: 13px; }
+  #drop-zone .icon { font-size: 32px; color: var(--muted); }
+  #file-input { display: none; }
+
+  /* 文件列表 */
+  .file-list { margin-top: 16px; }
+  .file-item {
+    display: grid;
+    grid-template-columns: 1fr 180px 90px 60px;
+    gap: 12px;
+    padding: 8px 12px;
+    border: 1px solid #f0f0f0;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    align-items: center;
+    font-size: 13px;
+  }
+  .file-item .name { font-family: ui-monospace, monospace; color: #595959; }
+  .file-item .type { color: var(--primary); }
+  .file-item .rows { color: var(--muted); text-align: right; }
+  .file-item .status { text-align: center; }
+  .status-ok { color: var(--ok); }
+  .status-warn { color: var(--warn); }
+  .status-err { color: var(--err); }
+
+  /* 表格 */
+  .table-wrap {
+    overflow-x: auto;
+    max-height: 600px;
+    border: 1px solid #f0f0f0;
+    border-radius: 4px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th, td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #f0f0f0;
+    text-align: left;
+    white-space: nowrap;
+  }
+  th {
+    background: #fafafa;
+    position: sticky;
+    top: 0;
+    font-weight: 600;
+    color: #262626;
+    z-index: 1;
+  }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr:hover { background: #fafafa; }
+  .placeholder {
+    padding: 32px;
+    text-align: center;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<h1>kila 达人投放数据汇总</h1>
+<div class="subtitle">拖拽 Excel 进入下方区域 → 自动输出达人维度和商品维度统计表</div>
+
+<!-- 上传区 -->
+<div class="panel">
+  <div class="panel-title">
+    <span>① 上传 Excel 文件</span>
+    <div class="toolbar">
+      <button id="btn-clear-files">清空</button>
+    </div>
+  </div>
+  <div id="drop-zone">
+    <div class="icon">📂</div>
+    <div>把 Excel 文件拖到这里，或<a href="#" id="trigger-input" style="color: var(--primary);">点击选择</a></div>
+    <div class="hint">支持：合作视频明细表 / 精选联盟订单明细表 / 达人发布明细表 / 乘方推广-产品 / 乘方推广-达人</div>
+    <input type="file" id="file-input" multiple accept=".xlsx,.xls">
+  </div>
+  <div class="file-list" id="file-list"></div>
+</div>
+
+<!-- 达人维度 -->
+<div class="panel">
+  <div class="panel-title">
+    <span>② 达人维度统计</span>
+    <div class="toolbar">
+      <button id="btn-export" class="primary" disabled>导出 Excel</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <div id="table-talent" class="placeholder">上传文件后自动生成</div>
+  </div>
+</div>
+
+<!-- 商品维度 -->
+<div class="panel">
+  <div class="panel-title">
+    <span>③ 商品维度统计</span>
+    <div class="toolbar">
+      <button id="btn-clear-meta">清空手编数据</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <div id="table-product" class="placeholder">上传文件后自动生成</div>
+  </div>
+</div>
+
+<script>
+  // ============ 状态 ============
+  const state = {
+    files: [],       // [{name, type, rows, sheet数据}]
+    talent: [],      // 达人维度结果
+    product: [],     // 商品维度结果
+  };
+
+  // ============ DOM 引用 ============
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const fileListEl = document.getElementById('file-list');
+  const btnClearFiles = document.getElementById('btn-clear-files');
+  const btnExport = document.getElementById('btn-export');
+  const btnClearMeta = document.getElementById('btn-clear-meta');
+
+  // ============ 上传区交互 ============
+  document.getElementById('trigger-input').addEventListener('click', (e) => {
+    e.preventDefault();
+    fileInput.click();
+  });
+  dropZone.addEventListener('click', () => fileInput.click());
+  ['dragenter', 'dragover'].forEach(ev => {
+    dropZone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.add('dragover');
+    });
+  });
+  ['dragleave', 'drop'].forEach(ev => {
+    dropZone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.remove('dragover');
+    });
+  });
+  dropZone.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
+  fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+  btnClearFiles.addEventListener('click', () => {
+    state.files = [];
+    renderFileList();
+  });
+
+  function handleFiles(files) {
+    // Task 2 实现
+    console.log('收到文件:', files.length, '个 — 解析逻辑见 task 2');
+    Array.from(files).forEach(f => console.log(' -', f.name, f.size));
+  }
+
+  function renderFileList() {
+    if (!state.files.length) { fileListEl.innerHTML = ''; return; }
+    fileListEl.innerHTML = state.files.map(f => `
+      <div class="file-item">
+        <div class="name">${f.name}</div>
+        <div class="type">${f.type || '未识别'}</div>
+        <div class="rows">${f.rows ?? '-'} 行</div>
+        <div class="status status-${f.statusClass || 'ok'}">${f.statusText || '✓'}</div>
+      </div>
+    `).join('');
+  }
+
+  // ============ 健康检查 ============
+  window.addEventListener('load', () => {
+    if (typeof XLSX === 'undefined') {
+      alert('SheetJS 加载失败，请检查网络或换 CDN');
+    } else {
+      console.log('✓ SheetJS 已加载，版本:', XLSX.version);
+    }
+  });
+</script>
+
+</body>
+</html>

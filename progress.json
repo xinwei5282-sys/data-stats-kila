@@ -15,11 +15,11 @@
         "SheetJS 通过 window.XLSX 可访问"
       ],
       "priority": 1,
-      "status": "pending",
+      "status": "completed",
       "depends_on": [],
-      "started_at": null,
-      "completed_at": null,
-      "notes": ""
+      "started_at": "2026-05-24T16:42:00+08:00",
+      "completed_at": "2026-05-24T16:55:00+08:00",
+      "notes": "骨架完成。CDN SheetJS 0.18.5 可达，HTML 结构含 3 个 panel。文件解析逻辑留到 task 2 实现（task 1 只 console.log）。用户确认推进。"
     },
     {
       "id": 2,

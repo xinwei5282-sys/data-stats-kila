@@ -32,3 +32,4 @@
 
 ## 进度日志
 - 2026-05-24 16:40 — Phase 1 初始化：创建 progress.json，规划 8 个任务
+- 2026-05-24 16:55 — Task 1 完成：index.html 骨架（CDN + 3 panel + 拖拽区 UI）
