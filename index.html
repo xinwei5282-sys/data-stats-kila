@@ -367,6 +367,19 @@
     renderFileList();
   });
 
+  btnClearMeta.addEventListener('click', () => {
+    const meta = loadProductMeta();
+    const n = Object.keys(meta).length;
+    if (n === 0) {
+      alert('当前没有手编数据');
+      return;
+    }
+    if (!confirm(`确定清空 ${n} 个商品的手编数据（分类 / 客单价）？\n此操作不可撤销。`)) return;
+    localStorage.removeItem(PRODUCT_META_KEY);
+    recompute(); // 重新计算并渲染
+    console.log('✓ 已清空手编数据');
+  });
+
   // ============ 核心：解析文件 ============
   async function handleFiles(fileList) {
     const files = Array.from(fileList || []);
@@ -518,6 +531,40 @@
     return String(s).replace(/[&<>"']/g, c => ({
       '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
     })[c]);
+  }
+
+  // ============ localStorage：手编值持久化 ============
+  const PRODUCT_META_KEY = 'kila-stats:product-meta';
+
+  function loadProductMeta() {
+    try {
+      const raw = localStorage.getItem(PRODUCT_META_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      console.warn('读取手编值失败', e);
+      return {};
+    }
+  }
+
+  function saveProductMeta(meta) {
+    try {
+      localStorage.setItem(PRODUCT_META_KEY, JSON.stringify(meta));
+    } catch (e) {
+      console.error('保存手编值失败', e);
+    }
+  }
+
+  // 写入单个商品的手编值
+  function updateProductMeta(pid, field, value) {
+    const meta = loadProductMeta();
+    if (!meta[pid]) meta[pid] = {};
+    if (value == null || value === '') {
+      delete meta[pid][field];
+      if (Object.keys(meta[pid]).length === 0) delete meta[pid];
+    } else {
+      meta[pid][field] = value;
+    }
+    saveProductMeta(meta);
   }
 
   // ============ 工具函数 ============
@@ -796,6 +843,15 @@
     // 按净成交金额降序
     rows.sort((a, b) => b.netSales - a.netSales);
 
+    // 从 localStorage 回填手编值（按 商品ID 匹配）
+    const meta = loadProductMeta();
+    for (const r of rows) {
+      if (meta[r.pid]) {
+        if (meta[r.pid].category != null) r.category = meta[r.pid].category;
+        if (meta[r.pid].unitPrice != null) r.unitPrice = meta[r.pid].unitPrice;
+      }
+    }
+
     // 合计行
     const total = {
       pid: '', name: '合计', category: '', unitPrice: null,
@@ -1006,7 +1062,8 @@
         if (isNum && isNaN(v)) v = null;
       }
       state.product[i][field] = v;
-      console.log(`✎ 编辑: ${state.product[i].name} [${field}] = ${v}`);
+      updateProductMeta(state.product[i].pid, field, v);  // 持久化到 localStorage
+      console.log(`✎ 编辑: ${state.product[i].name} [${field}] = ${v} (已存)`);
       renderProductTable(); // 重渲染该表
     };
     input.addEventListener('blur', commit);

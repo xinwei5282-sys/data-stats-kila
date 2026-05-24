@@ -103,11 +103,11 @@
         "重新上传 Excel 不会丢失已手编的数据（按商品ID 匹配回填）"
       ],
       "priority": 6,
-      "status": "pending",
+      "status": "completed",
       "depends_on": [5],
-      "started_at": null,
-      "completed_at": null,
-      "notes": ""
+      "started_at": "2026-05-24T18:35:00+08:00",
+      "completed_at": "2026-05-24T18:42:00+08:00",
+      "notes": "localStorage key='kila-stats:product-meta'。computeProduct 末尾按商品ID 回填手编值，编辑时 updateProductMeta 立即写盘。清空按钮二次确认。重新上传 Excel 不丢手编值（按 pid 匹配）。"
     },
     {
       "id": 7,
