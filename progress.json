@@ -33,11 +33,11 @@
         "未识别的文件给出明确提示，不让流程崩"
       ],
       "priority": 2,
-      "status": "pending",
+      "status": "completed",
       "depends_on": [1],
-      "started_at": null,
-      "completed_at": null,
-      "notes": ""
+      "started_at": "2026-05-24T16:58:00+08:00",
+      "completed_at": "2026-05-24T17:10:00+08:00",
+      "notes": "浏览器实测通过：11 个 xlsx 全识别，类型/行数与 node sanity check 完全一致。修正了之前对'麦兮/2/3 是空表'的错误判断（4 账号都有数据）。"
     },
     {
       "id": 3,

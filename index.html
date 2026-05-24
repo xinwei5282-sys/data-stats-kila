@@ -86,7 +86,7 @@
   .file-list { margin-top: 16px; }
   .file-item {
     display: grid;
-    grid-template-columns: 1fr 180px 90px 60px;
+    grid-template-columns: 1fr 160px 90px 80px 24px;
     gap: 12px;
     padding: 8px 12px;
     border: 1px solid #f0f0f0;
@@ -95,6 +95,51 @@
     align-items: center;
     font-size: 13px;
   }
+  .file-item .remove {
+    cursor: pointer;
+    color: var(--muted);
+    text-align: center;
+    user-select: none;
+  }
+  .file-item .remove:hover { color: var(--err); }
+
+  /* 状态聚合 */
+  .summary-bar {
+    margin-top: 12px;
+    padding: 10px 14px;
+    background: #f6ffed;
+    border: 1px solid #b7eb8f;
+    border-radius: 4px;
+    font-size: 13px;
+    color: #389e0d;
+    display: none;
+  }
+  .summary-bar.warn {
+    background: #fffbe6;
+    border-color: #ffe58f;
+    color: #d48806;
+  }
+  .summary-bar.show { display: block; }
+  .summary-bar code {
+    background: rgba(0,0,0,0.05);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+  }
+
+  /* 全局 loading */
+  #loading {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(255,255,255,0.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+    font-size: 16px;
+    color: var(--primary);
+  }
+  #loading.show { display: flex; }
   .file-item .name { font-family: ui-monospace, monospace; color: #595959; }
   .file-item .type { color: var(--primary); }
   .file-item .rows { color: var(--muted); text-align: right; }
@@ -158,7 +203,10 @@
     <input type="file" id="file-input" multiple accept=".xlsx,.xls">
   </div>
   <div class="file-list" id="file-list"></div>
+  <div class="summary-bar" id="summary-bar"></div>
 </div>
+
+<div id="loading">⏳ 正在解析 Excel...</div>
 
 <!-- 达人维度 -->
 <div class="panel">
@@ -187,65 +235,233 @@
 </div>
 
 <script>
-  // ============ 状态 ============
-  const state = {
-    files: [],       // [{name, type, rows, sheet数据}]
-    talent: [],      // 达人维度结果
-    product: [],     // 商品维度结果
+  // ============ 文件类型识别 ============
+  // 类型 → 中文标签、所需 sheet 名（null 表示用第一个 sheet）
+  const TYPES = {
+    cooperation_video: { label: '合作视频明细',  sheet: null,     mergeable: false },
+    union_orders:      { label: '精选联盟订单',  sheet: 'Sheet1', mergeable: false },
+    talent_publish:    { label: '达人发布明细',  sheet: null,     mergeable: false },
+    ad_product:        { label: '乘方推广-产品', sheet: null,     mergeable: true  },
+    ad_talent:         { label: '乘方推广-达人', sheet: null,     mergeable: true  },
   };
 
-  // ============ DOM 引用 ============
-  const dropZone = document.getElementById('drop-zone');
-  const fileInput = document.getElementById('file-input');
-  const fileListEl = document.getElementById('file-list');
-  const btnClearFiles = document.getElementById('btn-clear-files');
-  const btnExport = document.getElementById('btn-export');
+  function recognizeType(fileName) {
+    const n = fileName;
+    if (n.includes('合作视频')) return 'cooperation_video';
+    if (n.includes('精选联盟')) return 'union_orders';
+    if (n.includes('达人发布')) return 'talent_publish';
+    if (n.includes('乘方推广') && n.includes('产品')) return 'ad_product';
+    if (n.includes('乘方推广') && n.includes('达人')) return 'ad_talent';
+    return null;
+  }
+
+  // ============ 状态 ============
+  const state = {
+    files: [],   // [{name, type, rows, statusClass, statusText, data}]
+    data: {      // 按类型分组的合并数据（多份乘方推广 append）
+      cooperation_video: [],
+      union_orders: [],
+      talent_publish: [],
+      ad_product: [],
+      ad_talent: [],
+    },
+    talent: [],
+    product: [],
+  };
+
+  // ============ DOM ============
+  const dropZone     = document.getElementById('drop-zone');
+  const fileInput    = document.getElementById('file-input');
+  const fileListEl   = document.getElementById('file-list');
+  const summaryBar   = document.getElementById('summary-bar');
+  const loadingEl    = document.getElementById('loading');
+  const btnClearFiles= document.getElementById('btn-clear-files');
+  const btnExport    = document.getElementById('btn-export');
   const btnClearMeta = document.getElementById('btn-clear-meta');
 
   // ============ 上传区交互 ============
   document.getElementById('trigger-input').addEventListener('click', (e) => {
     e.preventDefault();
+    e.stopPropagation();
     fileInput.click();
   });
   dropZone.addEventListener('click', () => fileInput.click());
   ['dragenter', 'dragover'].forEach(ev => {
     dropZone.addEventListener(ev, (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       dropZone.classList.add('dragover');
     });
   });
   ['dragleave', 'drop'].forEach(ev => {
     dropZone.addEventListener(ev, (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       dropZone.classList.remove('dragover');
     });
   });
   dropZone.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
-  fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+  fileInput.addEventListener('change', (e) => {
+    handleFiles(e.target.files);
+    fileInput.value = ''; // 允许重选同名文件
+  });
 
   btnClearFiles.addEventListener('click', () => {
+    if (!state.files.length) return;
+    if (!confirm('清空全部已上传文件？')) return;
     state.files = [];
+    rebuildDataIndex();
     renderFileList();
   });
 
-  function handleFiles(files) {
-    // Task 2 实现
-    console.log('收到文件:', files.length, '个 — 解析逻辑见 task 2');
-    Array.from(files).forEach(f => console.log(' -', f.name, f.size));
+  // ============ 核心：解析文件 ============
+  async function handleFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+
+    loadingEl.classList.add('show');
+    try {
+      // 串行解析，避免大文件时浏览器卡死
+      for (const file of files) {
+        await parseOneFile(file);
+        renderFileList(); // 每解析完一个就更新
+      }
+      rebuildDataIndex();
+      renderFileList();
+    } finally {
+      loadingEl.classList.remove('show');
+    }
   }
 
+  async function parseOneFile(file) {
+    const type = recognizeType(file.name);
+    const entry = {
+      name: file.name,
+      type,
+      rows: 0,
+      statusClass: 'ok',
+      statusText: '✓',
+      data: null,
+    };
+
+    if (!type) {
+      entry.statusClass = 'err';
+      entry.statusText = '未识别';
+      upsertFile(entry);
+      console.warn('文件未识别:', file.name);
+      return;
+    }
+
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+
+      // 选 sheet
+      const cfg = TYPES[type];
+      let sheetName = cfg.sheet;
+      if (!sheetName || !wb.SheetNames.includes(sheetName)) {
+        sheetName = wb.SheetNames[0];
+      }
+      const ws = wb.Sheets[sheetName];
+      const raw = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false });
+
+      // 清洗：trim 字符串字段（抖店导出常带 trailing \t）
+      const cleaned = raw.map(cleanRow);
+      entry.data = cleaned;
+      entry.rows = cleaned.length;
+
+      if (cleaned.length === 0) {
+        entry.statusClass = 'warn';
+        entry.statusText = '空表';
+      }
+    } catch (e) {
+      entry.statusClass = 'err';
+      entry.statusText = '解析失败';
+      console.error('解析失败:', file.name, e);
+    }
+
+    upsertFile(entry);
+  }
+
+  function cleanRow(row) {
+    const out = {};
+    for (const k of Object.keys(row)) {
+      let v = row[k];
+      if (typeof v === 'string') v = v.trim();
+      out[k.trim()] = v;
+    }
+    return out;
+  }
+
+  function upsertFile(entry) {
+    const i = state.files.findIndex(f => f.name === entry.name);
+    if (i >= 0) state.files[i] = entry;
+    else state.files.push(entry);
+  }
+
+  // 按类型聚合 data，多份 mergeable 的会拼接
+  function rebuildDataIndex() {
+    for (const t of Object.keys(state.data)) state.data[t] = [];
+    for (const f of state.files) {
+      if (!f.type || !f.data) continue;
+      state.data[f.type] = state.data[f.type].concat(f.data);
+    }
+    console.log('数据索引:', Object.fromEntries(
+      Object.entries(state.data).map(([k, v]) => [TYPES[k].label, v.length])
+    ));
+    renderSummary();
+  }
+
+  // ============ 文件列表 UI ============
   function renderFileList() {
-    if (!state.files.length) { fileListEl.innerHTML = ''; return; }
-    fileListEl.innerHTML = state.files.map(f => `
+    if (!state.files.length) {
+      fileListEl.innerHTML = '';
+      return;
+    }
+    fileListEl.innerHTML = state.files.map((f, i) => `
       <div class="file-item">
-        <div class="name">${f.name}</div>
-        <div class="type">${f.type || '未识别'}</div>
-        <div class="rows">${f.rows ?? '-'} 行</div>
-        <div class="status status-${f.statusClass || 'ok'}">${f.statusText || '✓'}</div>
+        <div class="name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div>
+        <div class="type">${f.type ? TYPES[f.type].label : '—'}</div>
+        <div class="rows">${f.rows.toLocaleString()} 行</div>
+        <div class="status status-${f.statusClass}">${f.statusText}</div>
+        <div class="remove" data-i="${i}" title="移除">✕</div>
       </div>
     `).join('');
+    // 绑定移除按钮
+    fileListEl.querySelectorAll('.remove').forEach(el => {
+      el.addEventListener('click', () => {
+        const idx = +el.dataset.i;
+        state.files.splice(idx, 1);
+        rebuildDataIndex();
+        renderFileList();
+      });
+    });
+  }
+
+  function renderSummary() {
+    const required = ['cooperation_video', 'union_orders', 'talent_publish', 'ad_product', 'ad_talent'];
+    const missing = required.filter(t => state.data[t].length === 0);
+    const present = required.filter(t => state.data[t].length > 0);
+
+    if (state.files.length === 0) {
+      summaryBar.classList.remove('show');
+      return;
+    }
+
+    summaryBar.classList.add('show');
+    if (missing.length === 0) {
+      summaryBar.classList.remove('warn');
+      summaryBar.innerHTML = `✓ 5 类数据齐全，可进入下一步统计`;
+    } else {
+      summaryBar.classList.add('warn');
+      summaryBar.innerHTML =
+        `已识别: ${present.map(t => `<code>${TYPES[t].label}</code>`).join(' ')}<br>` +
+        `还缺: ${missing.map(t => `<code>${TYPES[t].label}</code>`).join(' ')}`;
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    })[c]);
   }
 
   // ============ 健康检查 ============
