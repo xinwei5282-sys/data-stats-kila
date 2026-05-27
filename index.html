@@ -147,6 +147,7 @@
   .status-ok { color: var(--ok); }
   .status-warn { color: var(--warn); }
   .status-err { color: var(--err); }
+  .status-muted { color: var(--muted); }
 
   /* 表格 */
   .table-wrap {
@@ -276,6 +277,18 @@
   </div>
 </div>
 
+<!-- 反查诊断 -->
+<div class="panel" id="diag-panel" style="display:none">
+  <div class="panel-title">
+    <span>⚠️ 商品 ID 反查诊断 <span id="diag-summary" style="font-weight:normal;color:var(--muted);font-size:13px"></span></span>
+    <div class="toolbar">
+      <button id="btn-toggle-diag">展开</button>
+      <button id="btn-clear-mapping">清空映射</button>
+    </div>
+  </div>
+  <div id="diag-body" style="display:none"></div>
+</div>
+
 <!-- 商品维度 -->
 <div class="panel">
   <div class="panel-title">
@@ -322,6 +335,11 @@
     },
     talent: [],
     product: [],
+    // —— 当前分析月份（推断自达人发布明细的最大日期；4月数据上传 → 4月，5月 → 5月）——
+    currentYear: 2026,
+    currentMonth: 4,            // 1-12
+    monthLabel: '4月',          // 用于过滤 talent_publish['月份']
+    diagnostics: { unmapped: [], ambiguous: [], productList: [] },
   };
 
   // ============ DOM ============
@@ -386,6 +404,24 @@
     localStorage.removeItem(PRODUCT_META_KEY);
     recompute(); // 重新计算并渲染
     console.log('✓ 已清空手编数据');
+  });
+
+  // 诊断面板：折叠 / 清空映射
+  document.getElementById('btn-toggle-diag').addEventListener('click', () => {
+    const body = document.getElementById('diag-body');
+    const btn = document.getElementById('btn-toggle-diag');
+    const collapsed = body.style.display === 'none';
+    body.style.display = collapsed ? '' : 'none';
+    btn.textContent = collapsed ? '收起' : '展开';
+  });
+  document.getElementById('btn-clear-mapping').addEventListener('click', () => {
+    const m = loadNameMapping();
+    const n = Object.keys(m).length;
+    if (n === 0) { alert('当前没有短名→商品ID 映射'); return; }
+    if (!confirm(`确定清空 ${n} 条短名→商品ID 映射？\n清空后所有手动指定的反查关系会失效。`)) return;
+    localStorage.removeItem(NAME_MAPPING_KEY);
+    recompute();
+    console.log('✓ 已清空短名映射');
   });
 
   // ============ 核心：解析文件 ============
@@ -483,6 +519,8 @@
     console.log('数据索引:', Object.fromEntries(
       Object.entries(state.data).map(([k, v]) => [TYPES[k].label, v.length])
     ));
+    // 月份推断必须在 summary 渲染之前（summary 会显示当前月份）
+    inferCurrentMonth();
     renderSummary();
     recompute();
   }
@@ -524,14 +562,17 @@
     }
 
     summaryBar.classList.add('show');
+    const monthHint = state.monthLabel
+      ? `<br>当前分析月份: <b>${state.monthLabel}</b>（自动识别自达人发布明细的最大日期）`
+      : '';
     if (missing.length === 0) {
       summaryBar.classList.remove('warn');
-      summaryBar.innerHTML = `✓ 5 类数据齐全，可进入下一步统计`;
+      summaryBar.innerHTML = `✓ 5 类数据齐全，可进入下一步统计${monthHint}`;
     } else {
       summaryBar.classList.add('warn');
       summaryBar.innerHTML =
         `已识别: ${present.map(t => `<code>${TYPES[t].label}</code>`).join(' ')}<br>` +
-        `还缺: ${missing.map(t => `<code>${TYPES[t].label}</code>`).join(' ')}`;
+        `还缺: ${missing.map(t => `<code>${TYPES[t].label}</code>`).join(' ')}${monthHint}`;
     }
   }
 
@@ -608,6 +649,34 @@
     saveTalentMeta(meta);
   }
 
+  // —— 短名 → 商品ID 手动映射（用于反查失败或歧义短名）——
+  const NAME_MAPPING_KEY = 'kila-stats:name-mapping';
+
+  function loadNameMapping() {
+    try {
+      const raw = localStorage.getItem(NAME_MAPPING_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      console.warn('读取短名映射失败', e);
+      return {};
+    }
+  }
+
+  function saveNameMapping(mapping) {
+    try {
+      localStorage.setItem(NAME_MAPPING_KEY, JSON.stringify(mapping));
+    } catch (e) {
+      console.error('保存短名映射失败', e);
+    }
+  }
+
+  function updateNameMapping(shortName, pid) {
+    const mapping = loadNameMapping();
+    if (pid == null || pid === '') delete mapping[shortName];
+    else mapping[shortName] = pid;
+    saveNameMapping(mapping);
+  }
+
   // ============ 工具函数 ============
   // 抖店导出的数字字段经常带千分位逗号 / 百分号 → 必须清洗
   function num(v) {
@@ -618,11 +687,89 @@
     return isNaN(n) ? 0 : n;
   }
 
-  // 判断"发布时间"字符串是否在 4 月（兼容 2026-04 / 2026/04 / 2026/4/ 多种格式）
-  function isApril(dateStr) {
-    if (!dateStr) return false;
-    const s = String(dateStr);
-    return s.startsWith('2026-04') || s.startsWith('2026/04') || s.startsWith('2026/4/');
+  // 乘方推广 表里"投放消耗"字段：5 月有的账号叫"整体消耗"，有的叫"综合成本"，值一致
+  function adCostOf(r) {
+    return num(r['整体消耗'] != null ? r['整体消耗'] : r['综合成本']);
+  }
+
+  // 合作视频明细表里"投放消耗"字段：自动检测列名（不同月份导出的列名可能不一样）
+  // 第一次调用时扫描所有键，记下哪个键名包含"消耗"，后续直接复用
+  let _videoCostKey = null;
+  function videoAdCostOf(r) {
+    if (_videoCostKey === null) {
+      const preferred = ['投放消耗(元)', '投放消耗', '抖加消耗', '千川消耗', '整体消耗', '综合消耗'];
+      for (const k of preferred) {
+        if (k in r) { _videoCostKey = k; break; }
+      }
+      if (_videoCostKey === null) {
+        for (const k of Object.keys(r)) {
+          if (k.includes('消耗') || k.includes('花费')) { _videoCostKey = k; break; }
+        }
+      }
+      console.log('[debug] 合作视频明细 投放消耗列识别为:', _videoCostKey);
+    }
+    if (_videoCostKey && r[_videoCostKey] != null && r[_videoCostKey] !== '') return num(r[_videoCostKey]);
+    return 0;
+  }
+
+  // 把 Excel 读出来的日期值统一格式化成 YYYY-MM-DD
+  function formatPubTime(v) {
+    if (v == null || v === '') return '';
+    if (v instanceof Date && !isNaN(v.getTime())) {
+      const y = v.getFullYear(), m = String(v.getMonth() + 1).padStart(2, '0'), d = String(v.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    const s = String(v).trim();
+    const m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (m) return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+    return s;
+  }
+
+  // 解析任意日期值（Date 对象 / 字符串）为 { year, month }，失败返回 null
+  function parseYearMonth(v) {
+    if (v == null || v === '') return null;
+    if (v instanceof Date && !isNaN(v.getTime())) {
+      return { year: v.getFullYear(), month: v.getMonth() + 1 };
+    }
+    const s = String(v).trim();
+    // 支持 2026-04-XX / 2026/04/XX / 2026/4/XX / 2026-4-XX
+    const m = s.match(/^(\d{4})[-/](\d{1,2})/);
+    if (m) return { year: parseInt(m[1], 10), month: parseInt(m[2], 10) };
+    return null;
+  }
+
+  // 判断日期是否在 state.currentYear/currentMonth 这一月
+  function isInCurrentMonth(dateVal) {
+    const ym = parseYearMonth(dateVal);
+    if (!ym) return false;
+    return ym.year === state.currentYear && ym.month === state.currentMonth;
+  }
+
+  // 从达人发布明细的"发布日期"列推断当前分析月份；空表 fallback 合作视频表；都空 fallback {2026, 4}
+  function inferCurrentMonth() {
+    const { talent_publish, cooperation_video } = state.data;
+    let best = null;
+    // 优先源：达人发布明细（人工录入，月份语义最准）
+    for (const r of talent_publish) {
+      const ym = parseYearMonth(r['发布日期']);
+      if (!ym) continue;
+      const key = ym.year * 100 + ym.month;
+      if (!best || key > best.year * 100 + best.month) best = ym;
+    }
+    // fallback：合作视频明细（注意会包含 2024/2025 历史数据，所以仅在发布表完全为空时用）
+    if (!best) {
+      for (const r of cooperation_video) {
+        const ym = parseYearMonth(r['发布时间']);
+        if (!ym) continue;
+        const key = ym.year * 100 + ym.month;
+        if (!best || key > best.year * 100 + best.month) best = ym;
+      }
+    }
+    if (!best) best = { year: 2026, month: 4 };
+    state.currentYear = best.year;
+    state.currentMonth = best.month;
+    state.monthLabel = `${best.month}月`;
+    return best;
   }
 
   function fmtMoney(n) {
@@ -638,6 +785,12 @@
   function computeTalent() {
     const { cooperation_video, union_orders, talent_publish, ad_talent, ad_product } = state.data;
 
+    // 一次性调试：打印合作视频明细第一条的所有列名，确认"投放消耗"列名
+    if (cooperation_video.length > 0) {
+      console.log('[debug] keys =', Object.keys(cooperation_video[0]).join(' | '));
+      console.log('[debug] sample =', JSON.stringify(cooperation_video[0]));
+    }
+
     // 全局商品名字典（跨乘方推广 + 精选联盟）
     const productName = new Map();
     for (const r of ad_product) {
@@ -650,16 +803,21 @@
     }
     // 用于按商品反查发布条数（与商品维度共用逻辑）
     const nameToId = new Map();
+    const validPids = new Set();
     for (const r of ad_product) {
       const pid = String(r['商品ID'] || '').trim();
       const nm = (r['商品名称'] || '').trim();
+      if (pid) validPids.add(pid);
       if (pid && nm && !nameToId.has(nm)) nameToId.set(nm, pid);
     }
+    const nameMapping = loadNameMapping();
+    // 优先级：商品ID列 > 手动映射 > 短名精确 > 短名模糊
     function lookupPid(pub) {
       const direct = String(pub['商品ID'] || '').trim();
       if (direct) return direct;
       const sn = (pub['产品名称'] || '').trim();
       if (!sn) return null;
+      if (nameMapping[sn] && validPids.has(nameMapping[sn])) return nameMapping[sn];
       if (nameToId.has(sn)) return nameToId.get(sn);
       for (const [longName, pid] of nameToId) {
         if (longName.includes(sn)) return pid;
@@ -670,6 +828,21 @@
     // 合作达人 = 乘方推广-达人(4账号合并) 里出现的达人（去重，只看真正投流的）
     const talents = new Set();
     ad_talent.forEach(r => r['抖音号名称'] && talents.add(r['抖音号名称']));
+
+    // 预聚合：当月已投流（是否投放='是'）视频条数 — 用于子行投放消耗按比例分摊
+    // 口径：合作视频明细表 5月起没有"投放消耗(元)"列，子行投放消耗按"该商品已投流视频数 / 该达人当月已投流视频总数"分摊主行总消耗
+    const talentInvestedVideos = new Map();             // 达人 → 当月已投流视频总数
+    const talentProductInvestedVideos = new Map();      // 达人|pid → 当月已投流视频数
+    for (const r of cooperation_video) {
+      if (String(r['是否投放']).trim() !== '是') continue;
+      if (!isInCurrentMonth(r['发布时间'])) continue;
+      const name = r['达人昵称'];
+      const pid = String(r['带货商品ID'] || '').trim();
+      if (!name || !pid) continue;
+      talentInvestedVideos.set(name, (talentInvestedVideos.get(name) || 0) + 1);
+      const key = `${name}\x00${pid}`;
+      talentProductInvestedVideos.set(key, (talentProductInvestedVideos.get(key) || 0) + 1);
+    }
 
     // 对接人字典：达人昵称 → 对接人（从 达人发布明细表 抽取，取首个非空值）
     const contactMap = new Map();
@@ -683,22 +856,25 @@
 
     for (const name of talents) {
       // ===== 达人级别（4 个汇总值）=====
-      // 当月发布条数 = 合作视频明细表 4 月发布的该达人视频数（抖店实际导出，比达人发布明细表准）
+      // 当月发布条数 = 合作视频明细表 当月发布的该达人视频数（抖店实际导出，比达人发布明细表准）
       const publishCount = cooperation_video.filter(
-        r => r['达人昵称'] === name && isApril(r['发布时间'])
+        r => r['达人昵称'] === name && isInCurrentMonth(r['发布时间'])
       ).length;
 
       const gsvTotal = union_orders
         .filter(r => r['作者账号'] === name)
         .reduce((s, r) => s + num(r['支付金额']) - num(r['订单退货退款']), 0);
 
+      // 当月发布素材投放消耗 = 合作视频明细表 该达人 + 发布时间 ∈ 当前月 sum(投放消耗)
+      // 口径：只统计「本月发布素材」的投流消耗，与列名一致
       const adCostThisMonth = cooperation_video
-        .filter(r => r['达人昵称'] === name && isApril(r['发布时间']))
-        .reduce((s, r) => s + num(r['投放消耗(元)']), 0);
+        .filter(r => r['达人昵称'] === name && isInCurrentMonth(r['发布时间']))
+        .reduce((s, r) => s + videoAdCostOf(r), 0);
 
+      // 投放消耗（含非当月）= 乘方推广-达人 4 账号合并 日期='全部' sum(整体消耗 ?? 综合成本)
       const adCostTotal = ad_talent
         .filter(r => r['抖音号名称'] === name && r['日期'] === '全部')
-        .reduce((s, r) => s + num(r['整体消耗']), 0);
+        .reduce((s, r) => s + adCostOf(r), 0);
 
       // 跳过完全无数据的达人
       if (publishCount === 0 && gsvTotal === 0 && adCostThisMonth === 0 && adCostTotal === 0) continue;
@@ -714,37 +890,57 @@
         });
       // 也加入该达人在达人发布明细里发布过的商品ID（反查）
       talent_publish
-        .filter(r => r['达人昵称'] === name && r['月份'] === '4月')
+        .filter(r => r['达人昵称'] === name && r['月份'] === state.monthLabel)
         .forEach(r => {
           const pid = lookupPid(r);
           if (pid) pidsFromVideo.add(pid);
         });
 
       // 计算每个商品的子行
+      const totalInvested = talentInvestedVideos.get(name) || 0;
       const items = [];
       for (const pid of pidsFromVideo) {
         const gsv = union_orders
           .filter(r => r['作者账号'] === name && String(r['商品id']) === pid)
           .reduce((s, r) => s + num(r['支付金额']) - num(r['订单退货退款']), 0);
-        // 按商品的发布条数 = 合作视频明细表 4 月发布 + 带货商品ID 匹配
+        // 按商品的发布条数 = 合作视频明细表 当月发布 + 带货商品ID 匹配
         const videosOfProductApr = cooperation_video
-          .filter(r => r['达人昵称'] === name && isApril(r['发布时间']) && String(r['带货商品ID']) === pid);
+          .filter(r => r['达人昵称'] === name && isInCurrentMonth(r['发布时间']) && String(r['带货商品ID']) === pid);
         const pubCount = videosOfProductApr.length;
-        // 按商品的当月投放消耗 = 该达人 × 该商品 4月发布视频 sum(投放消耗(元))
-        const pubCost = videosOfProductApr.reduce((s, r) => s + num(r['投放消耗(元)']), 0);
-        // 按商品的含非当月投放消耗 = 该达人 × 该商品 全部时间 sum(投放消耗(元))
-        const pubCostAll = cooperation_video
-          .filter(r => r['达人昵称'] === name && String(r['带货商品ID']) === pid)
-          .reduce((s, r) => s + num(r['投放消耗(元)']), 0);
         // 子行只在 gsv > 0 或 pubCount > 0 时才显示
         if (gsv === 0 && pubCount === 0) continue;
+
+        // 子行当月发布素材投放消耗 = 合作视频明细 该达人 + 该商品 + 发布时间 ∈ 当前月 sum(投放消耗)
+        //   — 与主行口径一致：只统计本月发布素材的投流消耗
+        // 子行投放消耗（含非当月）= 主行 adCostTotal × (该商品已投流视频数 / 该达人已投流视频总数)
+        //   — ad_talent 没有商品ID，只能按已投流视频数比例分摊；未投流该商品 → 显示 '-'
+        const videosOfProductAll = cooperation_video
+          .filter(r => r['达人昵称'] === name && String(r['带货商品ID']) === pid);
+        const allocatedThisMonth = videosOfProductAll
+          .filter(r => isInCurrentMonth(r['发布时间']))
+          .reduce((s, r) => s + videoAdCostOf(r), 0);
+        const investedHere = talentProductInvestedVideos.get(`${name}\x00${pid}`) || 0;
+        const ratio = (totalInvested > 0 && investedHere > 0) ? investedHere / totalInvested : 0;
+        const allocatedTotal = ratio > 0 ? adCostTotal * ratio : null;
+
+        const outputVideos = videosOfProductAll.filter(r => num(r['用户支付金额(元)']) > 0);
+        const outputVideoCount = outputVideos.length;
+        let topVideo = null;
+        for (const v of outputVideos) {
+          if (!topVideo || num(v['用户支付金额(元)']) > num(topVideo['用户支付金额(元)'])) topVideo = v;
+        }
+
         items.push({
           pid,
           productName: productName.get(pid) || '(未知商品)',
           gsv,
           publishCount: pubCount,
-          adCostThisMonth: pubCost,
-          adCostTotal: pubCostAll,
+          adCostThisMonth: allocatedThisMonth,
+          adCostTotal: allocatedTotal,
+          outputVideoCount,
+          topVideoLink: topVideo ? (topVideo['播放链接'] || '') : '',
+          topVideoPubTime: topVideo ? formatPubTime(topVideo['发布时间']) : '',
+          topVideoSales: topVideo ? num(topVideo['用户支付金额(元)']) : 0,
         });
       }
       items.sort((a, b) => b.gsv - a.gsv);
@@ -762,8 +958,12 @@
         gsvTotal,
         adCostThisMonth,
         adCostTotal,
+        outputVideoCount: null,
+        topVideoLink: '',
+        topVideoPubTime: '',
+        topVideoSales: 0,
       });
-      // 子行：商品ID + 商品名 + 按商品的 GSV + 按商品的发布条数 + 按商品的投放消耗（当月 / 含非当月）
+      // 子行：商品ID + 商品名 + 按商品的 GSV + 发布条数 + 投放消耗 + 有产出素材数 + 最高产出视频
       for (const it of items) {
         rows.push({
           _type: 'item',
@@ -776,6 +976,10 @@
           gsvTotal: null,
           adCostThisMonth: it.adCostThisMonth,
           adCostTotal: it.adCostTotal,
+          outputVideoCount: it.outputVideoCount,
+          topVideoLink: it.topVideoLink,
+          topVideoPubTime: it.topVideoPubTime,
+          topVideoSales: it.topVideoSales,
         });
       }
     }
@@ -793,7 +997,7 @@
       }
     }
 
-    // 合计行
+    // 合计行（合计行只在汇总列汇总；3 个新列在合计行留空）
     const total = {
       _type: 'total',
       name: '合计',
@@ -805,6 +1009,10 @@
       gsvTotal: headers.reduce((s, r) => s + r.gsvTotal, 0),
       adCostThisMonth: headers.reduce((s, r) => s + r.adCostThisMonth, 0),
       adCostTotal: headers.reduce((s, r) => s + r.adCostTotal, 0),
+      outputVideoCount: null,
+      topVideoLink: '',
+      topVideoPubTime: '',
+      topVideoSales: 0,
     };
     sorted.push(total);
 
@@ -839,15 +1047,15 @@
 
     // 反查达人发布明细的商品 ID
     // 达人发布明细里"产品名称"是短名（如"奶酪鸡块"），乘方推广里是长名（如"【圣农】原汁原味肉多多鸡块小马奶酪鸡块..."）
-    // 用"短名包含于长名"作为反查规则
+    // 优先级：商品ID列 > 手动映射 > 短名精确 > 短名模糊（"短名包含于长名"）
+    const nameMapping = loadNameMapping();
     function lookupPid(pubRow) {
       const directPid = String(pubRow['商品ID'] || '').trim();
       if (directPid && productMap.has(directPid)) return directPid;
       const shortName = (pubRow['产品名称'] || '').trim();
       if (!shortName) return null;
-      // 精确匹配优先
+      if (nameMapping[shortName] && productMap.has(nameMapping[shortName])) return nameMapping[shortName];
       if (nameToId.has(shortName)) return nameToId.get(shortName);
-      // 模糊：长名包含短名
       for (const [longName, pid] of nameToId) {
         if (longName.includes(shortName)) return pid;
       }
@@ -858,17 +1066,17 @@
     let unmapped = 0;  // 反查失败的发布记录数
 
     for (const [pid, p] of productMap) {
-      // ⑤ 4月素材发布条数 = 达人发布明细 月份='4月' 商品ID=该商品 count
+      // ⑤ 当月素材发布条数 = 达人发布明细 月份=当月 商品ID=该商品 count
       let publishCount = 0;
       for (const pub of talent_publish) {
-        if (pub['月份'] !== '4月') continue;
+        if (pub['月份'] !== state.monthLabel) continue;
         if (lookupPid(pub) === pid) publishCount++;
       }
 
-      // ⑥ 投放消耗 = 乘方推广-产品 4 账号合并 日期='全部' sum(整体消耗)
+      // ⑥ 投放消耗 = 乘方推广-产品 4 账号合并 日期='全部' sum(整体消耗 ?? 综合成本)
       const adCost = ad_product
         .filter(r => String(r['商品ID']) === pid && r['日期'] === '全部')
-        .reduce((s, r) => s + num(r['整体消耗']), 0);
+        .reduce((s, r) => s + adCostOf(r), 0);
 
       // ⑦ 净成交金额 = 乘方推广-产品 4 账号合并 日期='全部' sum(净成交金额)
       const netSales = ad_product
@@ -904,7 +1112,7 @@
 
     // 统计反查失败数
     for (const pub of talent_publish) {
-      if (pub['月份'] !== '4月') continue;
+      if (pub['月份'] !== state.monthLabel) continue;
       if (!lookupPid(pub)) unmapped++;
     }
 
@@ -937,17 +1145,183 @@
     return { rows, unmapped };
   }
 
+  // ============ 计算：商品 ID 反查诊断 ============
+  // 扫描达人发布明细当月条目，列出"未填商品ID 列"且短名反查不靠谱（失败/歧义/已手动映射）的情况
+  function computeDiagnostics() {
+    const { talent_publish, ad_product } = state.data;
+    const monthLabel = state.monthLabel;
+    const nameMapping = loadNameMapping();
+
+    const productList = [];
+    const seenPids = new Set();
+    const nameToId = new Map();
+    for (const r of ad_product) {
+      const pid = String(r['商品ID'] || '').trim();
+      const nm = (r['商品名称'] || '').trim();
+      if (!pid || !nm) continue;
+      if (!nameToId.has(nm)) nameToId.set(nm, pid);
+      if (!seenPids.has(pid)) {
+        seenPids.add(pid);
+        productList.push({ pid, name: nm });
+      }
+    }
+
+    // 按短名聚合当月发布表里"未填商品ID"的记录
+    const shortStats = new Map();
+    for (const pub of talent_publish) {
+      if (pub['月份'] !== monthLabel) continue;
+      const directPid = String(pub['商品ID'] || '').trim();
+      if (directPid) continue;
+      const short = (pub['产品名称'] || '').trim();
+      if (!short) continue;
+      if (!shortStats.has(short)) {
+        const candidates = [];
+        if (nameToId.has(short)) {
+          candidates.push({ pid: nameToId.get(short), name: short, exact: true });
+        } else {
+          const seen = new Set();
+          for (const [longName, pid] of nameToId) {
+            if (longName.includes(short) && !seen.has(pid)) {
+              seen.add(pid);
+              candidates.push({ pid, name: longName });
+            }
+          }
+        }
+        shortStats.set(short, { count: 0, contacts: new Set(), candidates });
+      }
+      const stat = shortStats.get(short);
+      stat.count++;
+      const contact = (pub['对接人'] || '').trim();
+      if (contact) stat.contacts.add(contact);
+    }
+
+    const unmapped = [], ambiguous = [], mapped = [], single = [];
+    for (const [short, stat] of shortStats) {
+      const mappedPid = (nameMapping[short] && seenPids.has(nameMapping[short])) ? nameMapping[short] : null;
+      const entry = {
+        short, count: stat.count,
+        contacts: Array.from(stat.contacts),
+        candidates: stat.candidates,
+        mappedPid,
+      };
+      if (mappedPid) mapped.push(entry);
+      else if (stat.candidates.length === 0) unmapped.push(entry);
+      else if (stat.candidates.length > 1) ambiguous.push(entry);
+      else single.push(entry); // 单一命中：默认认为正常，但允许审计
+    }
+
+    // 失败排前面、按条数降序
+    unmapped.sort((a, b) => b.count - a.count);
+    ambiguous.sort((a, b) => b.count - a.count);
+    mapped.sort((a, b) => b.count - a.count);
+    single.sort((a, b) => b.count - a.count);
+
+    return { productList, unmapped, ambiguous, mapped, single };
+  }
+
+  // ============ 渲染：反查诊断面板 ============
+  function renderDiagnostics() {
+    const panel = document.getElementById('diag-panel');
+    const summary = document.getElementById('diag-summary');
+    const body = document.getElementById('diag-body');
+    const { unmapped, ambiguous, mapped, single, productList } = state.diagnostics;
+
+    const total = unmapped.length + ambiguous.length + mapped.length + single.length;
+    if (total === 0) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = '';
+    const parts = [];
+    if (unmapped.length) parts.push(`反查失败 <b style="color:var(--err)">${unmapped.length}</b>`);
+    if (ambiguous.length) parts.push(`歧义 <b style="color:var(--warn)">${ambiguous.length}</b>`);
+    if (mapped.length) parts.push(`已手动映射 <b style="color:var(--ok)">${mapped.length}</b>`);
+    if (single.length) parts.push(`单一命中 <b style="color:var(--muted)">${single.length}</b>`);
+    summary.innerHTML = '(' + parts.join(' · ') + ')';
+
+    const renderRow = (entry, statusClass, statusLabel) => {
+      const opts = ['<option value="">--未指定--</option>'].concat(
+        productList.map(p =>
+          `<option value="${escapeHtml(p.pid)}" ${entry.mappedPid === p.pid ? 'selected' : ''}>${escapeHtml(p.name.substring(0, 40))}${p.name.length > 40 ? '…' : ''}</option>`
+        )
+      ).join('');
+      const cands = entry.candidates.length > 0
+        ? entry.candidates.map(c => `<span title="${escapeHtml(c.name)}">${escapeHtml(c.name.substring(0, 22))}${c.name.length > 22 ? '…' : ''}</span>`).join(' / ')
+        : '<span style="color:var(--err)">无候选</span>';
+      return `
+        <tr>
+          <td><span class="status-${statusClass}">${statusLabel}</span></td>
+          <td><b>${escapeHtml(entry.short)}</b></td>
+          <td class="num">${entry.count}</td>
+          <td style="color:var(--muted);font-size:12px">${escapeHtml(entry.contacts.join(' / '))}</td>
+          <td style="font-size:12px;color:var(--muted)">${cands}</td>
+          <td><select class="mapping-select" data-short="${escapeHtml(entry.short)}" style="max-width:280px">${opts}</select></td>
+        </tr>
+      `;
+    };
+
+    // "单一命中"默认显示当前命中的长名作为候选；用户审计时如果发现归错，可在右侧改
+    // 给 single 列表里每条的 mappedPid 暂填当前命中（仅用于 select 高亮显示，不实际写入 localStorage）
+    const singleWithHint = single.map(e => ({ ...e, mappedPid: e.candidates[0]?.pid || null }));
+
+    body.innerHTML = `
+      <div style="font-size:13px;color:var(--muted);margin-bottom:8px">
+        达人发布明细表"产品名称"列是短名，需要反查到乘方推广表的商品 ID。下方列出反查情况，请在右侧指定目标商品（保存到 localStorage，下次自动命中）。
+        <br><b>建议</b>：让运营在达人发布表的"商品ID"列直接填 ID，可绕过本面板。
+      </div>
+      <div class="table-wrap" style="max-height:500px">
+        <table>
+          <thead>
+            <tr>
+              <th>状态</th>
+              <th>短名</th>
+              <th class="num">条数</th>
+              <th>对接人</th>
+              <th>当前候选（长名）</th>
+              <th>指定目标商品</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${unmapped.map(e => renderRow(e, 'err', '失败')).join('')}
+            ${ambiguous.map(e => renderRow(e, 'warn', '歧义')).join('')}
+            ${mapped.map(e => renderRow(e, 'ok', '已映射')).join('')}
+            ${singleWithHint.length ? `<tr><td colspan="6" style="background:#fafafa;color:var(--muted);font-size:12px;padding:6px 12px">▾ 以下为"单一候选"短名 — 当前算法自动归属（如发现归错请在右侧改）</td></tr>` : ''}
+            ${singleWithHint.map(e => renderRow(e, 'muted', '单一')).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    body.querySelectorAll('.mapping-select').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const short = sel.dataset.short;
+        const pid = sel.value;
+        updateNameMapping(short, pid);
+        console.log(`✎ 短名映射: "${short}" → ${pid || '(已清除)'}`);
+        recompute();
+      });
+    });
+  }
+
   // ============ 重新计算入口 ============
   function recompute() {
     state.talent = [];
     state.product = [];
     let productResult = { rows: [], unmapped: 0 };
+
+    // 月份已在 rebuildDataIndex 里推断好
+    console.log(`📅 当前分析月份: ${state.monthLabel} (${state.currentYear}-${String(state.currentMonth).padStart(2,'0')})`);
+
     // 至少要有这些表才能算
     if (state.data.union_orders.length > 0 || state.data.ad_product.length > 0) {
       state.talent = computeTalent();
       productResult = computeProduct();
       state.product = productResult.rows;
     }
+
+    // 诊断面板（即使没算出商品维度也可以独立诊断）
+    state.diagnostics = computeDiagnostics();
+    renderDiagnostics();
 
     if (state.talent.length === 0 && state.product.length === 0) {
       renderTalentTable();
@@ -977,7 +1351,7 @@
       产出视频数: r.topVideos.length,
     })));
     if (productResult.unmapped > 0) {
-      console.warn(`⚠️ 达人发布明细表中 ${productResult.unmapped} 条 4月记录无法反查到商品ID（产品名不在乘方推广表中出现）`);
+      console.warn(`⚠️ 达人发布明细表中 ${productResult.unmapped} 条 ${state.monthLabel}记录无法反查到商品ID（产品名不在乘方推广表中出现 — 见上方"反查诊断"面板）`);
     }
 
     renderTalentTable();
@@ -1007,6 +1381,9 @@
             <th class="num">达人合计GSV</th>
             <th class="num">当月发布素材投放消耗</th>
             <th class="num">投放消耗（含非当月）</th>
+            <th class="num">有产出素材数</th>
+            <th>主要产出视频</th>
+            <th>视频发布时间</th>
           </tr>
         </thead>
         <tbody>
@@ -1015,6 +1392,9 @@
             const contactCell = r._type === 'header'
               ? `<td class="editable" data-table="talent" data-i="${i}" data-field="contact">${escapeHtml(r.contact || '')}</td>`
               : `<td></td>`;
+            const topVideoCell = r._type === 'item' && r.topVideoLink
+              ? `<a href="${escapeHtml(r.topVideoLink)}" target="_blank" style="color:var(--primary);text-decoration:none;font-size:12px" title="¥${r.topVideoSales.toFixed(0)}">查看视频<span style="color:var(--muted);margin-left:4px">¥${r.topVideoSales >= 10000 ? (r.topVideoSales/10000).toFixed(1)+'万' : r.topVideoSales.toFixed(0)}</span></a>`
+              : '<span class="empty">-</span>';
             return `
               <tr class="${cls}">
                 <td>${r._type === 'item' ? '' : escapeHtml(r.name)}</td>
@@ -1024,8 +1404,11 @@
                 <td title="${escapeHtml(r.productName || '')}">${escapeHtml((r.productName || '').substring(0, 28))}${r.productName && r.productName.length > 28 ? '…' : ''}</td>
                 <td class="num">${r.gsv != null ? fmtMoney(r.gsv) : ''}</td>
                 <td class="num">${r.gsvTotal != null ? fmtMoney(r.gsvTotal) : ''}</td>
-                <td class="num">${r.adCostThisMonth != null ? (r.adCostThisMonth ? fmtMoney(r.adCostThisMonth) : '-') : ''}</td>
-                <td class="num">${r.adCostTotal != null ? (r.adCostTotal ? fmtMoney(r.adCostTotal) : '-') : ''}</td>
+                <td class="num">${r.adCostThisMonth != null && r.adCostThisMonth > 0 ? fmtMoney(r.adCostThisMonth) : '<span class="empty">-</span>'}</td>
+                <td class="num">${r.adCostTotal != null && r.adCostTotal > 0 ? fmtMoney(r.adCostTotal) : '<span class="empty">-</span>'}</td>
+                <td class="num">${r._type === 'item' ? (r.outputVideoCount ? fmtInt(r.outputVideoCount) : '<span class="empty">-</span>') : ''}</td>
+                <td>${r._type === 'item' ? topVideoCell : ''}</td>
+                <td style="font-size:12px;color:var(--muted)">${r._type === 'item' ? escapeHtml(r.topVideoPubTime || '') : ''}</td>
               </tr>
             `;
           }).join('')}
@@ -1057,7 +1440,7 @@
             <th>商品名称</th>
             <th>商品ID</th>
             <th class="num">客单价<span style="font-weight:normal;color:#d48806;font-size:11px">（可编辑）</span></th>
-            <th class="num">4月素材发布条数</th>
+            <th class="num">${state.monthLabel}素材发布条数</th>
             <th class="num">投放消耗</th>
             <th class="num">净成交金额</th>
             <th class="num">ROI</th>
@@ -1175,12 +1558,16 @@
       '达人合计GSV':           r.gsvTotal != null ? Number(r.gsvTotal.toFixed(2)) : '',
       '当月发布素材投放消耗':  r.adCostThisMonth != null ? Number(r.adCostThisMonth.toFixed(2)) : '',
       '投放消耗（含非当月）':  r.adCostTotal != null ? Number(r.adCostTotal.toFixed(2)) : '',
+      '有产出素材数':          r._type === 'item' ? (r.outputVideoCount || 0) : '',
+      '主要产出视频':          r._type === 'item' ? (r.topVideoLink || '') : '',
+      '视频发布时间':          r._type === 'item' ? (r.topVideoPubTime || '') : '',
     }));
     const ws1 = XLSX.utils.json_to_sheet(talentRows);
     // 列宽
     ws1['!cols'] = [
       { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 22 }, { wch: 32 },
       { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 20 },
+      { wch: 12 }, { wch: 50 }, { wch: 14 },
     ];
     XLSX.utils.book_append_sheet(wb, ws1, '达人维度');
 
@@ -1190,7 +1577,7 @@
       '商品名称':          r.name || '',
       '商品ID':            r.pid || '',
       '客单价':            r.unitPrice != null ? Number(r.unitPrice) : '',
-      '4月素材发布条数':   r.publishCount || 0,
+      [`${state.monthLabel}素材发布条数`]: r.publishCount || 0,
       '投放消耗':          r.adCost != null ? Number(r.adCost.toFixed(2)) : '',
       '净成交金额':        r.netSales != null ? Number(r.netSales.toFixed(2)) : '',
       'ROI':               r.roi == null ? '-' : Number(r.roi.toFixed(2)),
